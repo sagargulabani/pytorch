@@ -1,6 +1,8 @@
 # Owner(s): ["oncall: export"]
 import unittest
-from typing import Any, Dict, Optional, OrderedDict, Tuple
+import warnings
+from collections import OrderedDict
+from typing import Any
 
 import torch
 from torch._export.passes.lift_constants_pass import (
@@ -16,27 +18,24 @@ from torch.export.exported_program import (
     OutputSpec,
     TensorArgument,
 )
-
 from torch.export.graph_signature import CustomObjArgument
 from torch.testing._internal.common_utils import (
-    find_library_location,
-    IS_FBCODE,
+    HardwareClassification,
     IS_MACOS,
-    IS_SANDCASTLE,
-    IS_WINDOWS,
     run_tests,
     TestCase,
 )
+from torch.testing._internal.torchbind_impls import load_torchbind_test_lib
 
 
 class GraphBuilder:
-    def __init__(self):
+    def __init__(self) -> None:
         self.graph = torch.fx.Graph()
         self.nodes = {}
         self.values = {}
-        self.nn_module_stack_key: Dict[str, int] = {}
+        self.nn_module_stack_key: dict[str, int] = {}
         self.latest_id = 0
-        self.input_to_kind: Dict[torch.fx.Node, InputKind] = {}
+        self.input_to_kind: dict[torch.fx.Node, InputKind] = {}
 
     def input(self, name: str, value: torch.Tensor, kind: InputKind):
         node = self.graph.placeholder(name)
@@ -72,7 +71,7 @@ class GraphBuilder:
         self.nodes[out] = node
 
     def constant(
-        self, name: str, value: Any, target: Optional[str] = None, module_fqn: str = ""
+        self, name: str, value: Any, target: str | None = None, module_fqn: str = ""
     ):
         if target is None:
             target = name
@@ -87,7 +86,7 @@ class GraphBuilder:
 
     def create_nn_module_stack(
         self, module_fqn: str
-    ) -> OrderedDict[int, Tuple[str, type]]:
+    ) -> OrderedDict[int, tuple[str, type]]:
         cur_name = ""
         nn_module_stack = OrderedDict()
         for atom in module_fqn.split("."):
@@ -115,9 +114,11 @@ class GraphBuilder:
                         kind=self.input_to_kind[node],
                         arg=TensorArgument(name=node.name),
                         target=None,
-                        persistent=True
-                        if self.input_to_kind[node] == InputKind.BUFFER
-                        else None,
+                        persistent=(
+                            True
+                            if self.input_to_kind[node] == InputKind.BUFFER
+                            else None
+                        ),
                     )
                 )
         return input_specs
@@ -125,9 +126,11 @@ class GraphBuilder:
     # NOTE: does not handle non-user-outputs atm
     def gen_graph_signature(self) -> ExportGraphSignature:
         output = [n for n in self.graph.nodes if n.op == "output"]
-        assert len(output) == 1
+        if len(output) != 1:
+            raise AssertionError(f"Expected 1 output node, got {len(output)}")
         output = output[0]
-        assert len(output.args) == 1, "multiple outputs NYI"
+        if len(output.args) != 1:
+            raise AssertionError(f"multiple outputs NYI, got {len(output.args)}")
 
         return ExportGraphSignature(
             input_specs=self.create_input_specs(),
@@ -142,20 +145,13 @@ class GraphBuilder:
         )
 
 
+@unittest.skipIf(IS_MACOS, "non-portable load_library call used in test")
 class TestLift(TestCase):
+    hw_classification = HardwareClassification.GENERIC
+
     def setUp(self):
-        if IS_MACOS:
-            raise unittest.SkipTest("non-portable load_library call used in test")
-        elif IS_SANDCASTLE or IS_FBCODE:
-            torch.ops.load_library(
-                "//caffe2/test/cpp/jit:test_custom_class_registrations"
-            )
-        elif IS_WINDOWS:
-            lib_file_path = find_library_location("torchbind_test.dll")
-            torch.ops.load_library(str(lib_file_path))
-        else:
-            lib_file_path = find_library_location("libtorchbind_test.so")
-            torch.ops.load_library(str(lib_file_path))
+        super().setUp()
+        load_torchbind_test_lib()
 
     def test_lift_basic(self):
         builder = GraphBuilder()
@@ -197,10 +193,10 @@ class TestLift(TestCase):
         # is at the root submodule.
         # TODO(suo): we shouldn't hardcode these names in the test, this is an
         # internal detail of the pass.
-        self.assertIn("_lifted_tensor_constant0", constants)
-        self.assertEqual(constants["_lifted_tensor_constant0"], const_tensor)
-        self.assertIn("_lifted_custom_obj0", constants)
-        self.assertEqual(constants["_lifted_custom_obj0"], const_obj)
+        self.assertIn("lifted_tensor_0", constants)
+        self.assertEqual(constants["lifted_tensor_0"], const_tensor)
+        self.assertIn("lifted_custom_0", constants)
+        self.assertEqual(constants["lifted_custom_0"], const_obj)
 
         # The constant node should be removed.
         getattr_nodes = [n for n in gm.graph.nodes if n.op == "get_attr"]
@@ -212,17 +208,17 @@ class TestLift(TestCase):
 
         # The lifted constant should be placed before user inputs but after params/buffers
         lifted_tensor_placeholder = placeholder_nodes[2]
-        self.assertEqual(lifted_tensor_placeholder.target, "_lifted_tensor_constant0")
+        self.assertEqual(lifted_tensor_placeholder.target, "lifted_tensor_0")
         # It should have a val equivalent to the constant
         self.assertEqual(lifted_tensor_placeholder.meta["val"], const_tensor)
 
         lifted_obj_placeholder = placeholder_nodes[3]
-        self.assertEqual(lifted_obj_placeholder.target, "_lifted_custom_obj0")
+        self.assertEqual(lifted_obj_placeholder.target, "lifted_custom_0")
         # It should have a val equivalent to the constant
         self.assertEqual(
             lifted_obj_placeholder.meta["val"],
             CustomObjArgument(
-                name="_lifted_custom_obj0",
+                name="lifted_custom_0",
                 class_fqn="__torch__.torch.classes._TorchScriptTesting._Foo",
             ),
         )
@@ -267,8 +263,8 @@ class TestLift(TestCase):
         self.assertEqual(len(constants), 1)
 
         # The key of the constants table should match the fqn of the constant.
-        self.assertIn("foo._lifted_tensor_constant0", constants)
-        self.assertEqual(constants["foo._lifted_tensor_constant0"], const_tensor)
+        self.assertIn("foo.lifted_tensor_0", constants)
+        self.assertEqual(constants["foo.lifted_tensor_0"], const_tensor)
 
         # The constant node should be removed.
         getattr_nodes = [n for n in gm.graph.nodes if n.op == "get_attr"]
@@ -280,7 +276,7 @@ class TestLift(TestCase):
 
         # The lifted constant should be placed before user inputs but after params/buffers
         lifted_constant_placeholder = placeholder_nodes[0]
-        self.assertEqual(lifted_constant_placeholder.target, "_lifted_tensor_constant0")
+        self.assertEqual(lifted_constant_placeholder.target, "lifted_tensor_0")
 
         # Graph signature should have been mutated a way that reflects the placeholders.
         constant_input_spec = graph_signature.input_specs[0]
@@ -353,7 +349,7 @@ class TestLift(TestCase):
 
     def test_unlift_nonpersistent_buffer(self):
         class Foo(torch.nn.Module):
-            def __init__(self):
+            def __init__(self) -> None:
                 super().__init__()
                 self.register_buffer(
                     "non_persistent_buf", torch.zeros(1), persistent=False
@@ -374,37 +370,52 @@ class TestLift(TestCase):
         self.assertIn("non_persistent_buf", stateful_gm._non_persistent_buffers_set)
         self.assertNotIn("non_persistent_buf", stateful_gm.state_dict())
 
+    def test_unlift_dotted_constant_requiring_grad(self):
+        # A dotted constant that the unlifted module already holds is not
+        # handled a second time, so it warns once.
+        class Foo(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.sub = torch.nn.Module()
+                self.sub.c = torch.randn(2, requires_grad=True)
 
+            def forward(self, x):
+                return x + self.sub.c
+
+        foo, x = Foo(), torch.randn(2)
+        exported = torch.export.export(foo, (x,), strict=False)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            module = exported.module()
+        self.assertEqual(len([w for w in caught if "`sub.c`" in str(w.message)]), 1)
+        self.assertEqual(module(x), foo(x))
+
+
+@unittest.skipIf(IS_MACOS, "non-portable load_library call used in test")
 class ConstantAttrMapTest(TestCase):
+    hw_classification = HardwareClassification.GENERIC
+
     def setUp(self):
-        if IS_MACOS:
-            raise unittest.SkipTest("non-portable load_library call used in test")
-        elif IS_SANDCASTLE or IS_FBCODE:
-            torch.ops.load_library(
-                "//caffe2/test/cpp/jit:test_custom_class_registrations"
-            )
-        elif IS_WINDOWS:
-            lib_file_path = find_library_location("torchbind_test.dll")
-            torch.ops.load_library(str(lib_file_path))
-        else:
-            lib_file_path = find_library_location("libtorchbind_test.so")
-            torch.ops.load_library(str(lib_file_path))
+        super().setUp()
+        load_torchbind_test_lib()
 
     def test_dict_api(self):
         constant_attr_map = ConstantAttrMap()
         const_obj = torch.classes._TorchScriptTesting._Foo(10, 20)
         const_tensor = torch.ones(2, 3)
-        constant_attr_map[const_obj] = "foo.bar"
-        constant_attr_map[const_tensor] = "foo.bar.baz"
+        constant_attr_map.add(const_obj, "foo.bar")
+        constant_attr_map.add(const_tensor, "foo.bar.baz")
         self.assertEqual(len(constant_attr_map), 2)
         self.assertEqual(list(constant_attr_map), [const_obj, const_tensor])
         self.assertEqual(list(constant_attr_map.keys()), [const_obj, const_tensor])
-        self.assertEqual(list(constant_attr_map.values()), ["foo.bar", "foo.bar.baz"])
-        self.assertEqual(constant_attr_map[const_obj], "foo.bar")
-        self.assertEqual(constant_attr_map[const_tensor], "foo.bar.baz")
+        self.assertEqual(
+            list(constant_attr_map.values()), [["foo.bar"], ["foo.bar.baz"]]
+        )
+        self.assertEqual(constant_attr_map[const_obj], ["foo.bar"])
+        self.assertEqual(constant_attr_map[const_tensor], ["foo.bar.baz"])
         self.assertTrue(const_obj in constant_attr_map)
         with self.assertRaises(TypeError):
-            constant_attr_map[1] = "foo.bar"
+            constant_attr_map.add(1, "foo.bar")
 
         del constant_attr_map[const_obj]
         self.assertEqual(len(constant_attr_map), 1)

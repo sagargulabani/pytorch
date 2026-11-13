@@ -9,7 +9,6 @@ from collections import namedtuple
 import torch
 from torch.autograd.profiler import record_function
 
-from .fuser import set_fuser
 from .runner import get_nn_runners
 
 
@@ -63,7 +62,8 @@ class Event:
         self.time = time.perf_counter()
 
     def elapsed_time(self, end_event):
-        assert isinstance(end_event, Event)
+        if not isinstance(end_event, Event):
+            raise AssertionError(f"Expected Event, but got {type(end_event)}")
         return end_event.time - self.time
 
 
@@ -117,7 +117,8 @@ def trainbench(
         if modeldef.backward is not None:
             with torch.no_grad():
                 for param in modeldef.params:
-                    assert param.grad is not None
+                    if param.grad is None:
+                        raise AssertionError("Parameter gradient must not be None")
                     param.grad.zero_()
 
         if device == "cuda":
@@ -127,7 +128,7 @@ def trainbench(
         bwd_time = bwd_start_event.elapsed_time(bwd_end_event)
         return fwd_time, bwd_time
 
-    creator_args = creator_args = {
+    creator_args = {
         "seqLength": seqLength,
         "numLayers": numLayers,
         "inputSize": inputSize,
@@ -205,7 +206,7 @@ def bench(rnn_runners, group_name, print_json=False, sep=" ", **params):
                 result_with_no_info = result._replace(info_fwd="None", info_bwd="None")
                 print_stderr(pretty_print(result_with_no_info, sep=sep))
                 results[name] = result
-            except Exception as e:
+            except Exception:
                 if not print_json:
                     raise
 
@@ -214,8 +215,7 @@ def bench(rnn_runners, group_name, print_json=False, sep=" ", **params):
             k: {"avg": v.avg_fwd, "std": v.std_fwd, "info": v.info_fwd}
             for k, v in results.items()
         },
-        group_name
-        + "-backward": {
+        f"{group_name}-backward": {
             k: {"avg": v.avg_bwd, "std": v.std_bwd, "info": v.info_bwd}
             for k, v in results.items()
         },
@@ -234,7 +234,7 @@ if __name__ == "__main__":
 
     # groups help control which test group you want to run
     # if you only want to run one/two benchmark, run it with
-    # e.g: python -m fastrnns.bench --rnns jit and --group rnns
+    # e.g: python -m fastrnns.bench --rnns py and --group rnns
     default_groups = ["cnns", "rnns"]
 
     parser.add_argument("--seqLength", default="100", type=int)
@@ -255,75 +255,27 @@ if __name__ == "__main__":
     )
     parser.add_argument("--sep", default=" ", type=str)
     parser.add_argument("--print-json", nargs="?", default=None, const="oss")
-    parser.add_argument("--rnns", nargs="*", help="What to run. cudnn, aten, jit, etc")
-    parser.add_argument(
-        "--cnns", nargs="*", help="What to run. resnet18, resnet18_jit, resnet50, etc"
-    )
+    parser.add_argument("--rnns", nargs="*", help="What to run. cudnn, aten, py")
+    parser.add_argument("--cnns", nargs="*", help="What to run. resnet18, resnet50")
     parser.add_argument(
         "--group",
         nargs="*",
         default=default_groups,
         help="Which group to run. cnns, rnns, etc.",
     )
-    parser.add_argument(
-        "--fuser",
-        default="te",
-        type=str,
-        help="The fuser backend to use. One of: te, old, or none",
-    )
-    parser.add_argument(
-        "--executor",
-        default=None,
-        type=str,
-        help="The executor to use. One of: legacy, simple, profiling",
-    )
-    parser.add_argument(
-        "--cuda-pointwise-loop-level",
-        "--cuda_pointwise_loop_level",
-        default=None,
-        type=int,
-    )
-    parser.add_argument(
-        "--cuda-pointwise-block-count",
-        "--cuda_pointwise_block_count",
-        default=None,
-        type=int,
-    )
-    parser.add_argument(
-        "--cuda-pointwise-block-size",
-        "--cuda_pointwise_block_size",
-        default=None,
-        type=int,
-    )
 
     args = parser.parse_args()
-    set_fuser(args.fuser, args.executor)
-
-    if args.cuda_pointwise_loop_level:
-        torch._C._jit_set_te_cuda_pointwise_loop_levels(args.cuda_pointwise_loop_level)
-    if args.cuda_pointwise_block_count:
-        torch._C._jit_set_te_cuda_pointwise_block_count(args.cuda_pointwise_block_count)
-    if args.cuda_pointwise_block_size:
-        torch._C._jit_set_te_cuda_pointwise_block_size(args.cuda_pointwise_block_size)
 
     rnns = args.rnns or [
         "cudnn",
         "aten",
-        "jit",
-        "jit_premul",
-        "jit_premul_bias",
-        "jit_simple",
-        "jit_multilayer",
         "py",
     ]
-    cnns = args.cnns or ["resnet18", "resnet18_jit", "resnet50", "resnet50_jit"]
-    # TODO: Maybe add a separate section for the layernorm/dropout lstms
-    # 'cudnn_layernorm', jit_layernorm', 'jit_layernom_decom',
-    # 'jit', 'jit_dropout', 'cudnn_dropout'
-    vlrnns = ["vl_cudnn", "vl_jit", "vl_py"]
+    cnns = args.cnns or ["resnet18", "resnet50"]
+    vlrnns = ["vl_cudnn", "vl_py"]
 
     if args.print_json:
-        print_stderr = lambda *args, **kwargs: None  # noqa: E731,F811
+        print_stderr = lambda *args, **kwargs: None  # noqa: E731
     print_stderr(args)
 
     bench_args = copy.deepcopy(vars(args))
@@ -332,11 +284,6 @@ if __name__ == "__main__":
     del bench_args["rnns"]
     del bench_args["cnns"]
     del bench_args["variable_lstms"]
-    del bench_args["fuser"]
-    del bench_args["executor"]
-    del bench_args["cuda_pointwise_loop_level"]
-    del bench_args["cuda_pointwise_block_count"]
-    del bench_args["cuda_pointwise_block_size"]
 
     results = {}
     if should_bench_varlen_lstms:

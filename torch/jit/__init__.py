@@ -1,7 +1,8 @@
+# mypy: allow-untyped-defs
 import warnings
-
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import Any as _Any
 
 import torch._C
 
@@ -20,15 +21,15 @@ from torch._jit_internal import (
     is_scripting,
     unused,
 )
-from torch.jit._async import fork, wait
+from torch.jit._async import fork as _fork, wait as _wait
 from torch.jit._await import _awaitable, _awaitable_nowait, _awaitable_wait
 from torch.jit._decomposition_utils import _register_decomposition
-from torch.jit._freeze import freeze, optimize_for_inference, run_frozen_optimizations
+from torch.jit._freeze import run_frozen_optimizations
 from torch.jit._fuser import (
     fuser,
     last_executed_optimized_graph,
     optimized_execution,
-    set_fusion_strategy,
+    set_fusion_strategy as _set_fusion_strategy,
 )
 from torch.jit._ir_utils import _InsertPoint
 from torch.jit._script import (
@@ -36,19 +37,14 @@ from torch.jit._script import (
     _unwrap_optional,
     Attribute,
     CompilationUnit,
-    interface,
     RecursiveScriptClass,
     RecursiveScriptModule,
-    script,
-    script_method,
     ScriptFunction,
     ScriptModule,
     ScriptWarning,
 )
 from torch.jit._serialization import (
     jit_module_from_flatbuffer,
-    load,
-    save,
     save_jit_module_to_flatbuffer,
 )
 from torch.jit._trace import (
@@ -59,14 +55,12 @@ from torch.jit._trace import (
     is_tracing,
     ONNXTracedModule,
     TopLevelTracedModule,
-    trace,
-    trace_module,
     TracedModule,
     TracerWarning,
     TracingCheckError,
 )
-
 from torch.utils import set_module
+
 
 __all__ = [
     "Attribute",
@@ -79,28 +73,13 @@ __all__ = [
     "enable_onednn_fusion",
     "export",
     "export_opnames",
-    "fork",
-    "freeze",
     "ignore",
     "isinstance",
-    "load",
     "onednn_fusion_enabled",
-    "optimize_for_inference",
-    "save",
-    "script",
     "script_if_tracing",
-    "set_fusion_strategy",
     "strict_fusion",
-    "trace",
-    "trace_module",
     "unused",
-    "wait",
 ]
-
-# For backwards compatibility
-_fork = fork
-_wait = wait
-_set_fusion_strategy = set_fusion_strategy
 
 
 def export_opnames(m):
@@ -127,6 +106,9 @@ Error.__qualname__ = "Error"
 def annotate(the_type, the_value):
     """Use to give type of `the_value` in TorchScript compiler.
 
+    .. deprecated:: 2.5
+        TorchScript is deprecated, please use ``torch.compile`` instead.
+
     This method is a pass-through function that returns `the_value`, used to hint TorchScript
     compiler the type of `the_value`. It is a no-op when running outside of TorchScript.
 
@@ -139,7 +121,7 @@ def annotate(the_type, the_value):
 
     Note that `annotate()` does not help in `__init__` method of `torch.nn.Module` subclasses because it
     is executed in eager mode. To annotate types of `torch.nn.Module` attributes,
-    use :meth:`~torch.jit.Annotate` instead.
+    use :meth:`~torch.jit.Attribute` instead.
 
     Example:
 
@@ -148,19 +130,8 @@ def annotate(the_type, the_value):
         import torch
         from typing import Dict
 
-        @torch.jit.script
-        def fn():
-            # Telling TorchScript that this empty dictionary is a (str -> int) dictionary
-            # instead of default dictionary type of (str -> Tensor).
-            d = torch.jit.annotate(Dict[str, int], {})
-
-            # Without `torch.jit.annotate` above, following statement would fail because of
-            # type mismatch.
-            d["name"] = 20
-
-    .. testcleanup::
-
-        del fn
+        d = torch.jit.annotate(Dict[str, int], {})
+        d["name"] = 20
 
     Args:
         the_type: Python type that should be passed to TorchScript compiler as type hint for `the_value`
@@ -176,12 +147,10 @@ def script_if_tracing(fn):
     """
     Compiles ``fn`` when it is first called during tracing.
 
-    ``torch.jit.script`` has a non-negligible start up time when it is first called due to
-    lazy-initializations of many compiler builtins. Therefore you should not use
-    it in library code. However, you may want to have parts of your library work
-    in tracing even if they use control flow. In these cases, you should use
-    ``@torch.jit.script_if_tracing`` to substitute for
-    ``torch.jit.script``.
+    .. deprecated:: 2.5
+        TorchScript is deprecated, please use ``torch.compile`` instead.
+
+    Compiles ``fn`` on its first call from an internal tracing consumer.
 
     Args:
         fn: A function to compile.
@@ -197,6 +166,9 @@ def script_if_tracing(fn):
 def isinstance(obj, target_type):
     """
     Provide container type refinement in TorchScript.
+
+    .. deprecated:: 2.5
+        TorchScript is deprecated, please use ``torch.compile`` instead.
 
     It can refine parameterized containers of the List, Dict, Tuple, and Optional types. E.g. ``List[str]``,
     ``Dict[str, List[torch.Tensor]]``, ``Optional[Tuple[int,str,int]]``. It can also
@@ -217,7 +189,7 @@ def isinstance(obj, target_type):
         from typing import Any, Dict, List
 
         class MyModule(torch.nn.Module):
-            def __init__(self):
+            def __init__(self) -> None:
                 super().__init__()
 
             def forward(self, input: Any): # note the Any type
@@ -228,7 +200,7 @@ def isinstance(obj, target_type):
                     for val in input.values():
                         print(val)
 
-        m = torch.jit.script(MyModule())
+        m = MyModule()
         x = [torch.rand(3,3), torch.rand(4,3)]
         m(x)
         y = {"key1":"val1","key2":"val2"}
@@ -241,27 +213,20 @@ class strict_fusion:
     """
     Give errors if not all nodes have been fused in inference, or symbolically differentiated in training.
 
-    Example:
-    Forcing fusion of additions.
+    .. deprecated:: 2.5
+        TorchScript is deprecated, please use ``torch.compile`` instead.
 
-    .. code-block:: python
-
-        @torch.jit.script
-        def foo(x):
-            with torch.jit.strict_fusion():
-                return x + x + x
-
+    Forcing fusion in retained scripted source is supported.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         if not torch._jit_internal.is_scripting():
-            warnings.warn("Only works in script mode")
-        pass
+            warnings.warn("Only works in script mode", stacklevel=2)
 
     def __enter__(self):
         pass
 
-    def __exit__(self, type: Any, value: Any, tb: Any) -> None:
+    def __exit__(self, type: _Any, value: _Any, tb: _Any) -> None:
         pass
 
 
@@ -278,17 +243,23 @@ def _hide_source_ranges() -> Iterator[None]:
         torch._C.Graph.set_global_print_source_ranges(old_enable_source_ranges)  # type: ignore[attr-defined]
 
 
-def enable_onednn_fusion(enabled: bool):
-    """Enable or disables onednn JIT fusion based on the parameter `enabled`."""
+def enable_onednn_fusion(enabled: bool) -> None:
+    """Enable or disables onednn JIT fusion based on the parameter `enabled`.
+
+    .. deprecated:: 2.5
+        TorchScript is deprecated, please use ``torch.compile`` instead.
+    """
     torch._C._jit_set_llga_enabled(enabled)
 
 
 def onednn_fusion_enabled():
-    """Return whether onednn JIT fusion is enabled."""
+    """Return whether onednn JIT fusion is enabled.
+
+    .. deprecated:: 2.5
+        TorchScript is deprecated, please use ``torch.compile`` instead.
+    """
     return torch._C._jit_llga_enabled()
 
-
-del Any
 
 if not torch._C._jit_init():
     raise RuntimeError("JIT initialization failed")

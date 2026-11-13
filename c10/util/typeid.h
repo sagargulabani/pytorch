@@ -19,7 +19,6 @@
 #include <c10/util/TypeIndex.h>
 #include <c10/util/TypeTraits.h>
 #include <c10/util/irange.h>
-#include <c10/util/string_view.h>
 
 #include <c10/core/ScalarType.h>
 
@@ -71,7 +70,7 @@ class C10_API TypeIdentifier final
    * is generated during run-time. Do NOT serialize the id for storage.
    */
   template <typename T>
-  static C10_HOST_CONSTEXPR_EXCEPT_WIN_CUDA TypeIdentifier Get() noexcept {
+  static constexpr TypeIdentifier Get() noexcept {
     return TypeIdentifier(c10::util::get_type_index<T>());
   }
 
@@ -135,7 +134,7 @@ struct TypeMetaData final {
       PlacementDelete* placementDelete,
       Delete* deleteFn,
       TypeIdentifier id,
-      c10::string_view name) noexcept
+      std::string_view name) noexcept
       : itemsize_(itemsize),
         new_(newFn),
         placementNew_(placementNew),
@@ -152,7 +151,7 @@ struct TypeMetaData final {
   PlacementDelete* placementDelete_;
   Delete* delete_;
   TypeIdentifier id_;
-  c10::string_view name_;
+  std::string_view name_;
 };
 
 // Mechanism for throwing errors which can't be prevented at compile time
@@ -328,6 +327,7 @@ class C10_API TypeMeta final {
    * type, use TypeMeta::Make<T>().
    */
   TypeMeta() noexcept;
+  ~TypeMeta() = default;
 
   /**
    * Copy constructor.
@@ -339,6 +339,7 @@ class C10_API TypeMeta final {
    */
   TypeMeta& operator=(const TypeMeta& src) noexcept = default;
 
+  TypeMeta& operator=(TypeMeta&& src) noexcept = default;
   TypeMeta(TypeMeta&& rhs) noexcept = default;
 
   inline TypeMeta& operator=(ScalarType scalar_type) noexcept {
@@ -374,7 +375,7 @@ class C10_API TypeMeta final {
    * Returns the size of the item.
    */
   inline size_t itemsize() const noexcept {
-    if (C10_LIKELY(isScalarType())) {
+    if (isScalarType()) [[likely]] {
       return scalarTypeItemSizes[index_];
     }
     return data().itemsize_;
@@ -392,7 +393,7 @@ class C10_API TypeMeta final {
     return data().placementNew_;
   }
   /**
-   * Returns the typed copy function pointer for individual iterms.
+   * Returns the typed copy function pointer for individual items.
    */
   Copy* copy() const noexcept {
     return data().copy_;
@@ -409,7 +410,7 @@ class C10_API TypeMeta final {
   /**
    * Returns a printable name for the type.
    */
-  c10::string_view name() const noexcept {
+  std::string_view name() const noexcept {
     return data().name_;
   }
 
@@ -423,12 +424,12 @@ class C10_API TypeMeta final {
   // Below are static functions that can be called by passing a specific type.
 
   template <class T>
-  static C10_HOST_CONSTEXPR_EXCEPT_WIN_CUDA TypeIdentifier Id() noexcept {
+  static constexpr TypeIdentifier Id() noexcept {
     return TypeIdentifier::Get<T>();
   }
 
   template <class T>
-  static c10::string_view TypeName() noexcept {
+  static std::string_view TypeName() noexcept {
     return c10::util::get_fully_qualified_type_name<T>();
   }
 
@@ -475,8 +476,8 @@ class C10_API TypeMeta final {
   /**
    * convert TypeMeta handles to ScalarType enum values
    */
-  inline ScalarType toScalarType() {
-    if (C10_LIKELY(isScalarType())) {
+  inline ScalarType toScalarType() const {
+    if (isScalarType()) [[likely]] {
       return static_cast<ScalarType>(index_);
     }
     error_unsupported_typemeta(*this);
@@ -489,19 +490,7 @@ class C10_API TypeMeta final {
   // note: constexpr provokes Windows compilation error "member may not be
   // initialized" static constexpr size_t MaxTypeIndex = 32;
   //
-#if defined C10_MOBILE
-// The reason for this not to be UINT8_MAX is that the array
-// initialization takes space which is proportional to the size of the array.
-// The compiler seems to add code (or data padding) to initialize the array with
-// empty elements. Please see
-// https://github.com/pytorch/pytorch/pull/51881 for details.
-//
-#define MaxTypeIndex                                                           \
-  (NumScalarTypes + 15 /* number of CAFFE_DEFINE_KNOWN_TYPE in typeid.cpp */ + \
-   1 /* 1 more for caffe2 tensor */)
-#else
 #define MaxTypeIndex UINT8_MAX
-#endif
 
   // Protects type metadata allocation.
   // NOLINTNEXTLINE(facebook-hte-NonPodStaticDeclaration)
@@ -703,7 +692,7 @@ using _guard_long_unique = std::conditional_t<
 
 CAFFE_DECLARE_KNOWN_TYPE(
     detail::_guard_long_unique<long>,
-    detail_guard_long_unique_long);
+    detail_guard_long_unique_long)
 CAFFE_DECLARE_KNOWN_TYPE(
     detail::_guard_long_unique<std::vector<long>>,
     detail_guard_long_unique_std_vector_long)

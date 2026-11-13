@@ -1,26 +1,28 @@
+from __future__ import annotations
+
 import glob
 import os
 import sys
 from pathlib import Path
-from typing import List, Optional, Union
+
 
 CPP_TEST_PREFIX = "cpp"
 CPP_TEST_PATH = "build/bin"
 CPP_TESTS_DIR = os.path.abspath(os.getenv("CPP_TESTS_DIR", default=CPP_TEST_PATH))
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def parse_test_module(test: str) -> str:
-    return test.split(".")[0]
+    return test.split(".", maxsplit=1)[0]
 
 
 def discover_tests(
     base_dir: Path = REPO_ROOT / "test",
-    cpp_tests_dir: Optional[Union[str, Path]] = None,
-    blocklisted_patterns: Optional[List[str]] = None,
-    blocklisted_tests: Optional[List[str]] = None,
-    extra_tests: Optional[List[str]] = None,
-) -> List[str]:
+    cpp_tests_dir: str | Path | None = None,
+    blocklisted_patterns: list[str] | None = None,
+    blocklisted_tests: list[str] | None = None,
+    extra_tests: list[str] | None = None,
+) -> list[str]:
     """
     Searches for all python files starting with test_ excluding one specified by patterns.
     If cpp_tests_dir is provided, also scan for all C++ tests under that directory. They
@@ -67,31 +69,30 @@ def discover_tests(
     return sorted(rc)
 
 
+# str.startswith prefixes of test/-relative test names without .py, whose files
+# run_test.py does not run on their own.
+BLOCKLISTED_PATTERNS = [
+    "ao",  # partly run by test_ao_sparsity.py
+    "custom_backend",  # run directly by the CI scripts, not by run_test.py
+    "fx",  # partly run by test_fx.py
+    "jit/test_hooks_modules",  # fixture module for supported C++ hook coverage
+    "mobile",  # not run
+    "package",  # run by test_package.py
+    "quantization",  # partly run by test_quantization.py
+    "autograd",  # partly run by test_autograd.py
+    # run by run_test.py's test_openreg handler, only with --openreg
+    "cpp_extensions/open_registration_extension/torch_openreg/tests",
+]
+
 TESTS = discover_tests(
     cpp_tests_dir=CPP_TESTS_DIR,
-    blocklisted_patterns=[
-        "ao",
-        "bottleneck_test",
-        "custom_backend",
-        "custom_operator",
-        "fx",  # executed by test_fx.py
-        "jit",  # executed by test_jit.py
-        "mobile",
-        "onnx_caffe2",
-        "package",  # executed by test_package.py
-        "quantization",  # executed by test_quantization.py
-        "autograd",  # executed by test_autograd.py
-    ],
+    blocklisted_patterns=BLOCKLISTED_PATTERNS,
     blocklisted_tests=[
+        "custom_operator/test_custom_ops",
         "test_bundled_images",
         "test_cpp_extensions_aot",
         "test_determination",
-        "test_jit_fuser",
-        "test_jit_simple",
-        "test_jit_string",
         "test_kernel_launch_checks",
-        "test_nnapi",
-        "test_static_runtime",
         "test_throughput_benchmark",
         "distributed/bin/test_script",
         "distributed/elastic/multiprocessing/bin/test_script",
@@ -102,9 +103,10 @@ TESTS = discover_tests(
         "distributed/test_c10d_spawn",
         "distributions/test_transforms",
         "distributions/test_utils",
+        "lazy/test_meta_kernel",
+        "lazy/test_extract_compiled_graph",
         "test/inductor/test_aot_inductor_utils",
-        "onnx/test_pytorch_onnx_onnxruntime_cuda",
-        "onnx/test_models",
+        "inductor/test_aoti_cross_compile_windows",
         # These are not C++ tests
         f"{CPP_TEST_PREFIX}/CMakeFiles",
         f"{CPP_TEST_PREFIX}/CTestTestfile.cmake",
@@ -131,6 +133,8 @@ TESTS = discover_tests(
         "distributed/elastic/utils/distributed_test",
         "distributed/elastic/multiprocessing/api_test",
         "doctests",
+        "test_autoload_enable",
+        "test_autoload_disable",
     ],
 )
 

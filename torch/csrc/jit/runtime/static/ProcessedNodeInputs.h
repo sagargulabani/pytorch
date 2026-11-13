@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 #include <memory>
 
@@ -31,11 +32,12 @@ class ProcessedNodeInputs {
   }
 
   uint16_t operator[](uint16_t idx) const {
+    // NOLINTNEXTLINE(*const-cast*)
     return (*const_cast<ProcessedNodeInputs*>(this))[idx];
   }
 
   uint16_t& operator[](uint16_t idx) {
-    if (C10_LIKELY(repr_.is_inline())) {
+    if (repr_.is_inline()) [[likely]] {
       TORCH_DCHECK_LT(idx, repr_.inline_repr_.size);
       return repr_.inline_repr_.inputs[idx];
     } else {
@@ -43,15 +45,15 @@ class ProcessedNodeInputs {
     }
   }
 
-  C10_NODISCARD uint16_t size() const {
-    if (C10_LIKELY(repr_.is_inline())) {
+  [[nodiscard]] uint16_t size() const {
+    if (repr_.is_inline()) [[likely]] {
       return repr_.inline_repr_.size;
     } else {
       return repr_.outline_repr_.size();
     }
   }
 
-  C10_NODISCARD bool empty() const {
+  [[nodiscard]] bool empty() const {
     return size() == 0;
   }
 
@@ -93,11 +95,11 @@ class ProcessedNodeInputs {
     HeapArrayPtr(HeapArrayPtr&&) noexcept = default;
     HeapArrayPtr& operator=(HeapArrayPtr&&) noexcept = default;
 
-    C10_NODISCARD bool empty() const {
+    [[nodiscard]] bool empty() const {
       return size() != 0;
     }
 
-    C10_NODISCARD uint16_t size() const {
+    [[nodiscard]] uint16_t size() const {
       return array_ ? array_[0] : 0;
     }
 
@@ -137,8 +139,8 @@ class ProcessedNodeInputs {
   // awkward.
 #pragma pack(push, 2)
   union Repr {
-    C10_NODISCARD bool is_inline() const {
-      uint8_t tag;
+    [[nodiscard]] bool is_inline() const {
+      uint8_t tag = 0;
       // Use of reinterpret_cast to pointer to char or unsigned char
       // is defined behavior; see
       // https://en.cppreference.com/w/cpp/language/reinterpret_cast .
@@ -215,8 +217,8 @@ class ProcessedNodeInputs {
 
     struct InlineRepr {
       uint8_t tag = 0x1;
-      uint8_t size;
-      uint16_t inputs[kMaxInlineInputs];
+      uint8_t size{};
+      uint16_t inputs[kMaxInlineInputs]{};
     };
 
     using OutlineRepr = HeapArrayPtr;

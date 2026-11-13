@@ -1,7 +1,8 @@
 #pragma once
 
 #include <ATen/ATen.h>
-#include <stdexcept>
+#include <chrono>
+#include <mutex>
 #include <vector>
 
 constexpr auto kNoTimeout = std::chrono::milliseconds(0);
@@ -30,13 +31,23 @@ enum class OpType : std::uint8_t {
   _REDUCE_SCATTER_BASE = 16,
   COALESCED = 17,
   _ALLREDUCE_SPARSE = 18,
+  REDUCE_SCATTER_TENSOR_COALESCED = 19,
+  ALLGATHER_INTO_TENSOR_COALESCED = 20,
+  UNKNOWN = 100,
+};
+
+// TODO: support different types of failures/errors
+enum class WorkResult : std::uint8_t {
+  SUCCESS = 0,
+  TIMEOUT = 1,
+  COMM_ERROR = 2,
   UNKNOWN = 100,
 };
 
 // Converts OpType to human readable string.
 TORCH_API std::string opTypeToString(OpType opType);
 
-// Whether or not an OP is an p2p op (SEND, RECV, RECVANYSOURCE)
+// Whether or not an OP is a p2p op (SEND, RECV, RECVANYSOURCE)
 TORCH_API bool isP2POp(OpType opType, bool batchP2P = false);
 
 // Please do not use Work API, it is going away, to be
@@ -49,8 +60,8 @@ class TORCH_API Work : public torch::CustomClassHolder {
       int rank = -1,
       OpType opType = OpType::UNKNOWN,
       const char* profilingTitle = nullptr,
-      const c10::optional<std::vector<at::Tensor>>& inputTensors =
-          c10::nullopt);
+      const std::optional<std::vector<at::Tensor>>& inputTensors =
+          std::nullopt);
 
   ~Work() override;
 
@@ -64,7 +75,7 @@ class TORCH_API Work : public torch::CustomClassHolder {
   // Returns exception if isSuccess() returned false.
   virtual std::exception_ptr exception() const;
 
-  // Returns source rank if this objects represents a recv-from-any.
+  // Returns source rank if this object represents a recv-from-any.
   virtual int sourceRank() const;
 
   // Returns result tensors, if applicable.
@@ -101,20 +112,48 @@ class TORCH_API Work : public torch::CustomClassHolder {
   //
   virtual bool wait(std::chrono::milliseconds timeout = kNoTimeout);
 
+  // Blocks the current stream until the work is completed.
+  // This is equivalent to synchronize for CUDA tensors but works for both CPU
+  // tensors and CUDA tensors by using a spinlock CUDA kernel.
+  // This will immediately return.
+  // If no stream is active it will throw an error.
+  virtual void blockCurrentStream();
+
   virtual void abort();
 
   // Returns a Future object that will be associated with the completion of
   // work. Only NCCL backend is currently supported.
   virtual c10::intrusive_ptr<c10::ivalue::Future> getFuture();
 
+  // Get a Future object that would be marked as either success or failure
+  // This API can be used by the user to track the completion of the work
+  // and handle the exception if any. The value is an int encoding WorkResult.
+  // Callbacks run on the thread that completes the future (e.g. a backend
+  // watchdog or a wait()/isCompleted() caller), or inline in addCallback if
+  // already complete. Backends should complete it with no locks held, so a
+  // callback may call back into the Work or issue another op; not all do
+  // (legacy NCCL, nccl2 reconfigure), and such a callback can deadlock there.
+  // Gloo p2p works complete it only in wait(), so it stays pending until the
+  // work is waited on.
+  // Throws c10::NotImplementedError if unsupported.
+  virtual c10::intrusive_ptr<c10::ivalue::Future> getFutureResult();
+
+  // Whether getFutureResult() is implemented. False means it throws; true
+  // doesn't guarantee it won't. Override it along with getFutureResult(), or
+  // FlightRecorderHook retires the Work's ops at issue. Called for every op
+  // FlightRecorderHook records, so it must be cheap.
+  virtual bool hasFutureResult() const;
+
   virtual float getDuration() const;
 
   virtual uint64_t getSequencenumber() const;
 
+  virtual std::chrono::milliseconds getTimeout() const;
+
   OpType retrieveOpType() const;
 
   static c10::intrusive_ptr<Work> create_from_future(
-      const c10::intrusive_ptr<c10::ivalue::Future>&);
+      const c10::intrusive_ptr<c10::ivalue::Future>& /*future*/);
 
  protected:
   // Completes the work object and optionally sets the exception in a
@@ -145,8 +184,8 @@ struct TORCH_API WorkInfo {
   WorkInfo(
       const OpType& opType,
       const uint64_t seq,
-      const std::chrono::time_point<std::chrono::system_clock>& timeStarted,
-      const std::chrono::time_point<std::chrono::system_clock>& timeFinished,
+      const std::chrono::time_point<std::chrono::steady_clock>& timeStarted,
+      const std::chrono::time_point<std::chrono::steady_clock>& timeFinished,
       const std::chrono::duration<float>& activeDuration)
       : opType(opType),
         seq(seq),
@@ -156,9 +195,12 @@ struct TORCH_API WorkInfo {
 
   OpType opType;
   uint64_t seq;
-  std::chrono::time_point<std::chrono::system_clock> timeStarted;
-  std::chrono::time_point<std::chrono::system_clock> timeFinished;
+  std::chrono::time_point<std::chrono::steady_clock> timeStarted;
+  std::chrono::time_point<std::chrono::steady_clock> timeFinished;
   std::chrono::duration<float> activeDuration;
 };
+
+TORCH_API void set_comm_profiling_name(const std::string& name);
+TORCH_API const std::string& get_comm_profiling_name();
 
 } // namespace c10d

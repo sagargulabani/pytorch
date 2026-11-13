@@ -1,12 +1,16 @@
 """Key enums and structs used to handle data flow within the benchmark."""
+
+# mypy: ignore-errors
+
 import dataclasses
 import enum
 import itertools as it
 import re
 import textwrap
-from typing import Dict, List, Optional, Set, Tuple, TYPE_CHECKING, Union
+from typing import TYPE_CHECKING
 
 from worker.main import WorkerTimerArgs
+
 
 if TYPE_CHECKING:
     # Benchmark utils are only partially strict compliant, so MyPy won't follow
@@ -26,7 +30,6 @@ TimerArgs = WorkerTimerArgs
 
 class RuntimeMode(enum.Enum):
     EAGER = "Eager"
-    JIT = "TorchScript"
     EXPLICIT = ""
 
 
@@ -45,7 +48,7 @@ class AutoLabels:
     language: Language
 
     @property
-    def as_dict(self) -> Dict[str, str]:
+    def as_dict(self) -> dict[str, str]:
         """Dict representation for CI reporting."""
         return {
             "runtime": self.runtime.value,
@@ -62,7 +65,10 @@ class GroupedSetup:
 
     def __post_init__(self) -> None:
         for field in dataclasses.fields(self):
-            assert field.type == str
+            if field.type is not str:
+                raise AssertionError(
+                    f"Expected field {field.name} to be str, but got {field.type}"
+                )
             value: str = getattr(self, field.name)
             object.__setattr__(self, field.name, textwrap.dedent(value))
 
@@ -79,7 +85,6 @@ class GroupedBenchmark:
     There are a variety of dimensions along which one might wish to measure
     PyTorch performance:
       - Python, C++
-      - Eager, TorchScript
       - Single threaded, multi threaded
       - Training, inference
 
@@ -114,16 +119,11 @@ class GroupedBenchmark:
             Then the signature is `f(x, y) -> z`. `signature` is required any
             time we need to generate part of a snippet:
              - When calling an opaque model provided by `init_from_models`
-             - When `torchscript=True`
              - When `autograd=True`
 
             If a return value is not needed (e.g. because of in place mutation)
             then `-> None` is valid, but a non-None return must be provided if
             `autograd=True`
-
-        torchscript:
-            If True, also JIT the stmt or model and generate benchmarks which
-            call the scripted version. Requires that `signature` is defined.
 
         autograd:
             If True, generate both forward and forward + backward benchmarks.
@@ -141,37 +141,30 @@ class GroupedBenchmark:
     # `GroupedStmts` (init_from_stmts) they are passed through from user args.
     # In the case of `GroupedModules` (init_from_model) they are generated
     # using `signature`. (e.g. `f(x, y) -> z` generates `z = model(x, y)`)
-    py_fwd_stmt: Optional[str]
-    cpp_fwd_stmt: Optional[str]
+    py_fwd_stmt: str | None
+    cpp_fwd_stmt: str | None
 
-    # Code block used to define a model. `init_from_stmts` will never populate
-    # `cpp_model_setup`, but if TorchScript is requested it will generate
-    # `py_model_setup` using `torch.jit.script`.
-    py_model_setup: Optional[str]
-    cpp_model_setup: Optional[str]
-
-    # True if this benchmark used `init_from_stmts`, otherwise False.
-    inferred_model_setup: bool
+    # Code blocks used to define a model by `init_from_model`.
+    py_model_setup: str | None
+    cpp_model_setup: str | None
 
     # Described above
     setup: GroupedSetup
-    signature_args: Optional[Tuple[str, ...]]
-    signature_output: Optional[str]
-    torchscript: bool
+    signature_args: tuple[str, ...] | None
+    signature_output: str | None
     autograd: bool
-    num_threads: Tuple[int, ...]
+    num_threads: tuple[int, ...]
 
     @classmethod
     def init_from_stmts(
         cls,
-        py_stmt: Optional[str] = None,
-        cpp_stmt: Optional[str] = None,
+        py_stmt: str | None = None,
+        cpp_stmt: str | None = None,
         # Generic constructor arguments
         setup: GroupedSetup = GroupedSetup(),
-        signature: Optional[str] = None,
-        torchscript: bool = False,
+        signature: str | None = None,
         autograd: bool = False,
-        num_threads: Union[int, Tuple[int, ...]] = 1,
+        num_threads: int | tuple[int, ...] = 1,
     ) -> "GroupedBenchmark":
         """Create a set of benchmarks from free-form statements.
 
@@ -185,26 +178,15 @@ class GroupedBenchmark:
             cpp_stmt = textwrap.dedent(cpp_stmt)
 
         signature_args, signature_output = cls._parse_signature(signature)
-        py_model_setup = (
-            cls._model_from_py_stmt(
-                py_stmt=py_stmt,
-                signature_args=signature_args,
-                signature_output=signature_output,
-            )
-            if torchscript
-            else None
-        )
 
         return cls(
             py_fwd_stmt=py_stmt,
             cpp_fwd_stmt=cpp_stmt,
-            py_model_setup=py_model_setup,
+            py_model_setup=None,
             cpp_model_setup=None,
-            inferred_model_setup=True,
             setup=setup,
             signature_args=signature_args,
             signature_output=signature_output,
-            torchscript=torchscript,
             autograd=autograd,
             num_threads=(num_threads,) if isinstance(num_threads, int) else num_threads,
         )
@@ -212,14 +194,13 @@ class GroupedBenchmark:
     @classmethod
     def init_from_model(
         cls,
-        py_model_setup: Optional[str] = None,
-        cpp_model_setup: Optional[str] = None,
+        py_model_setup: str | None = None,
+        cpp_model_setup: str | None = None,
         # Generic constructor arguments
         setup: GroupedSetup = GroupedSetup(),
-        signature: Optional[str] = None,
-        torchscript: bool = False,
+        signature: str | None = None,
         autograd: bool = False,
-        num_threads: Union[int, Tuple[int, ...]] = 1,
+        num_threads: int | tuple[int, ...] = 1,
     ) -> "GroupedBenchmark":
         """Create a set of benchmarks using torch.nn Modules.
 
@@ -237,16 +218,12 @@ class GroupedBenchmark:
             )
 
         return cls(
-            *cls._make_model_invocation(
-                signature_args, signature_output, RuntimeMode.EAGER
-            ),
+            *cls._make_model_invocation(signature_args, signature_output),
             py_model_setup=py_model_setup,
             cpp_model_setup=cpp_model_setup,
-            inferred_model_setup=False,
             setup=setup,
             signature_args=signature_args,
             signature_output=signature_output,
-            torchscript=torchscript,
             autograd=autograd,
             num_threads=(num_threads,) if isinstance(num_threads, int) else num_threads,
         )
@@ -256,8 +233,8 @@ class GroupedBenchmark:
         cls,
         py_block: str = "",
         cpp_block: str = "",
-        num_threads: Union[int, Tuple[int, ...]] = 1,
-    ) -> Dict[Union[Tuple[str, ...], Optional[str]], "GroupedBenchmark"]:
+        num_threads: int | tuple[int, ...] = 1,
+    ) -> dict[tuple[str, ...] | str | None, "GroupedBenchmark"]:
         py_cases, py_setup, py_global_setup = cls._parse_variants(
             py_block, Language.PYTHON
         )
@@ -265,7 +242,10 @@ class GroupedBenchmark:
             cpp_block, Language.CPP
         )
 
-        assert not py_global_setup
+        if py_global_setup:
+            raise AssertionError(
+                f"py_global_setup should be empty, but got: {py_global_setup}"
+            )
         setup = GroupedSetup(
             py_setup=py_setup,
             cpp_setup=cpp_setup,
@@ -275,9 +255,9 @@ class GroupedBenchmark:
         # NB: The key is actually `Tuple[str, ...]`, however MyPy gets confused
         #     and we use the superset `Union[Tuple[str, ...], Optional[str]` to
         #     match the expected signature.
-        variants: Dict[Union[Tuple[str, ...], Optional[str]], GroupedBenchmark] = {}
+        variants: dict[tuple[str, ...] | str | None, GroupedBenchmark] = {}
 
-        seen_labels: Set[str] = set()
+        seen_labels: set[str] = set()
         for label in it.chain(py_cases.keys(), cpp_cases.keys()):
             if label in seen_labels:
                 continue
@@ -328,8 +308,8 @@ class GroupedBenchmark:
 
     @staticmethod
     def _parse_signature(
-        signature: Optional[str],
-    ) -> Tuple[Optional[Tuple[str, ...]], Optional[str]]:
+        signature: str | None,
+    ) -> tuple[tuple[str, ...] | None, str | None]:
         if signature is None:
             return None, None
 
@@ -337,7 +317,7 @@ class GroupedBenchmark:
         if match is None:
             raise ValueError(f"Invalid signature: `{signature}`")
 
-        args: Tuple[str, ...] = tuple(match.groups()[0].split(", "))
+        args: tuple[str, ...] = tuple(match.groups()[0].split(", "))
         output: str = match.groups()[1].strip()
 
         if "," in output:
@@ -351,73 +331,36 @@ class GroupedBenchmark:
         return args, output
 
     @staticmethod
-    def _model_from_py_stmt(
-        py_stmt: Optional[str],
-        signature_args: Optional[Tuple[str, ...]],
-        signature_output: Optional[str],
-    ) -> str:
-        if py_stmt is None:
-            raise ValueError("`py_stmt` must be defined in order to derive a model.")
-
-        if signature_args is None:
-            raise ValueError("signature is needed in order to derive a model.")
-
-        return textwrap.dedent(
-            f"""\
-            def model({', '.join(signature_args)}):
-            {{stmt_str}}
-                return {signature_output}
-        """
-        ).format(stmt_str=textwrap.indent(py_stmt, " " * 4))
-
-    @staticmethod
     def _make_model_invocation(
-        signature_args: Tuple[str, ...],
-        signature_output: Optional[str],
-        runtime: RuntimeMode,
-    ) -> Tuple[str, str]:
+        signature_args: tuple[str, ...],
+        signature_output: str | None,
+    ) -> tuple[str, str]:
         py_prefix, cpp_prefix = "", ""
         if signature_output is not None:
             py_prefix = f"{signature_output} = "
             cpp_prefix = f"auto {signature_output} = "
 
-        if runtime == RuntimeMode.EAGER:
-            model_name = "model"
-            cpp_invocation = (
-                f"{cpp_prefix}{model_name}->forward({', '.join(signature_args)});"
-            )
-
-        else:
-            assert runtime == RuntimeMode.JIT
-            model_name = "jit_model"
-            cpp_invocation = textwrap.dedent(
-                f"""\
-                std::vector<torch::jit::IValue> ivalue_inputs({{
-                    {', '.join([f'torch::jit::IValue({a})' for a in signature_args])}
-                }});
-                {cpp_prefix}{model_name}.forward(ivalue_inputs);
-            """
-            )
+        cpp_invocation = f"{cpp_prefix}model->forward({', '.join(signature_args)});"
 
         # NB:
         #   In python we invoke __call__, however C++ doesn't have an analogous
         #   method so we invoke `forward` instead. This means that Python
         #   is doing extra work (e.g. checking hooks) compared to C++; however
         #   because this is the default user experience that's acceptable.
-        py_invocation = f"{py_prefix}{model_name}({', '.join(signature_args)})"
+        py_invocation = f"{py_prefix}model({', '.join(signature_args)})"
 
         return py_invocation, cpp_invocation
 
     @staticmethod
     def _parse_variants(
         block: str, language: Language
-    ) -> Tuple[Dict[str, List[str]], str, str]:
+    ) -> tuple[dict[str, list[str]], str, str]:
         block = textwrap.dedent(block).strip()
         comment = "#" if language == Language.PYTHON else "//"
         label_pattern = f"{comment} @(.+)$"
         label = ""
 
-        lines_by_label: Dict[str, List[str]] = {"SETUP": [], "GLOBAL_SETUP": []}
+        lines_by_label: dict[str, list[str]] = {"SETUP": [], "GLOBAL_SETUP": []}
         for line in block.splitlines(keepends=False):
             match = re.search(label_pattern, line.strip())
             if match:

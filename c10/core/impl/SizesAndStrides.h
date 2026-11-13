@@ -29,22 +29,20 @@ class C10_API SizesAndStrides {
   using strides_iterator = int64_t*;
   using strides_const_iterator = const int64_t*;
 
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
   SizesAndStrides() {
     size_at_unchecked(0) = 0;
     stride_at_unchecked(0) = 1;
   }
 
   ~SizesAndStrides() {
-    if (C10_UNLIKELY(!isInline())) {
+    if (!isInline()) [[unlikely]] {
       // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
       free(outOfLineStorage_);
     }
   }
 
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
   SizesAndStrides(const SizesAndStrides& rhs) : size_(rhs.size_) {
-    if (C10_LIKELY(rhs.isInline())) {
+    if (rhs.isInline()) [[likely]] {
       copyDataInline(rhs);
     } else {
       allocateOutOfLineStorage(size_);
@@ -52,12 +50,30 @@ class C10_API SizesAndStrides {
     }
   }
 
+  bool operator==(const SizesAndStrides& other) const {
+    if (size_ != other.size_) {
+      return false;
+    }
+    return !(
+        isInline()
+            ? std::memcmp(
+                  inlineStorage_, other.inlineStorage_, sizeof(inlineStorage_))
+            : std::memcmp(
+                  outOfLineStorage_,
+                  other.outOfLineStorage_,
+                  storageBytes(size_)));
+  }
+
+  bool operator!=(const SizesAndStrides& other) const {
+    return !(*this == other);
+  }
+
   SizesAndStrides& operator=(const SizesAndStrides& rhs) {
     if (this == &rhs) {
       return *this;
     }
-    if (C10_LIKELY(rhs.isInline())) {
-      if (C10_UNLIKELY(!isInline())) {
+    if (rhs.isInline()) [[likely]] {
+      if (!isInline()) [[unlikely]] {
         // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
         free(outOfLineStorage_);
       }
@@ -76,7 +92,7 @@ class C10_API SizesAndStrides {
 
   // Move from rhs. rhs.size() == 0 afterwards.
   SizesAndStrides(SizesAndStrides&& rhs) noexcept : size_(rhs.size_) {
-    if (C10_LIKELY(isInline())) {
+    if (isInline()) [[likely]] {
       memcpy(inlineStorage_, rhs.inlineStorage_, sizeof(inlineStorage_));
     } else {
       outOfLineStorage_ = rhs.outOfLineStorage_;
@@ -91,8 +107,8 @@ class C10_API SizesAndStrides {
     if (this == &rhs) {
       return *this;
     }
-    if (C10_LIKELY(rhs.isInline())) {
-      if (C10_UNLIKELY(!isInline())) {
+    if (rhs.isInline()) [[likely]] {
+      if (!isInline()) [[unlikely]] {
         // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
         free(outOfLineStorage_);
       }
@@ -112,12 +128,12 @@ class C10_API SizesAndStrides {
     return *this;
   }
 
-  size_t size() const noexcept {
+  [[nodiscard]] size_t size() const noexcept {
     return size_;
   }
 
   const int64_t* sizes_data() const noexcept {
-    if (C10_LIKELY(isInline())) {
+    if (isInline()) [[likely]] {
       return &inlineStorage_[0];
     } else {
       return &outOfLineStorage_[0];
@@ -125,7 +141,7 @@ class C10_API SizesAndStrides {
   }
 
   int64_t* sizes_data() noexcept {
-    if (C10_LIKELY(isInline())) {
+    if (isInline()) [[likely]] {
       return &inlineStorage_[0];
     } else {
       return &outOfLineStorage_[0];
@@ -163,7 +179,7 @@ class C10_API SizesAndStrides {
   }
 
   const int64_t* strides_data() const noexcept {
-    if (C10_LIKELY(isInline())) {
+    if (isInline()) [[likely]] {
       return &inlineStorage_[C10_SIZES_AND_STRIDES_MAX_INLINE_SIZE];
     } else {
       return &outOfLineStorage_[size()];
@@ -171,7 +187,7 @@ class C10_API SizesAndStrides {
   }
 
   int64_t* strides_data() noexcept {
-    if (C10_LIKELY(isInline())) {
+    if (isInline()) [[likely]] {
       return &inlineStorage_[C10_SIZES_AND_STRIDES_MAX_INLINE_SIZE];
     } else {
       return &outOfLineStorage_[size()];
@@ -179,7 +195,7 @@ class C10_API SizesAndStrides {
   }
 
   strides_const_iterator strides_begin() const noexcept {
-    if (C10_LIKELY(isInline())) {
+    if (isInline()) [[likely]] {
       return &inlineStorage_[C10_SIZES_AND_STRIDES_MAX_INLINE_SIZE];
     } else {
       return &outOfLineStorage_[size()];
@@ -187,7 +203,7 @@ class C10_API SizesAndStrides {
   }
 
   strides_iterator strides_begin() noexcept {
-    if (C10_LIKELY(isInline())) {
+    if (isInline()) [[likely]] {
       return &inlineStorage_[C10_SIZES_AND_STRIDES_MAX_INLINE_SIZE];
     } else {
       return &outOfLineStorage_[size()];
@@ -249,8 +265,8 @@ class C10_API SizesAndStrides {
     if (newSize == oldSize) {
       return;
     }
-    if (C10_LIKELY(
-            newSize <= C10_SIZES_AND_STRIDES_MAX_INLINE_SIZE && isInline())) {
+    if (newSize <= C10_SIZES_AND_STRIDES_MAX_INLINE_SIZE && isInline())
+        [[likely]] {
       if (oldSize < newSize) {
         const auto bytesToZero =
             (newSize - oldSize) * sizeof(inlineStorage_[0]);
@@ -269,7 +285,7 @@ class C10_API SizesAndStrides {
   void resizeSlowPath(size_t newSize, size_t oldSize);
 
  private:
-  bool isInline() const noexcept {
+  [[nodiscard]] bool isInline() const noexcept {
     return size_ <= C10_SIZES_AND_STRIDES_MAX_INLINE_SIZE;
   }
 

@@ -1,9 +1,10 @@
-# Owner(s): ["oncall: package/deploy"]
+# Owner(s): ["module: package/deploy"]
 
-from typing import Iterable
+from collections.abc import Iterable
 
 from torch.package import GlobGroup
-from torch.testing._internal.common_utils import run_tests
+from torch.testing._internal.common_utils import HardwareClassification, run_tests
+
 
 try:
     from .common import PackageTestCase
@@ -13,6 +14,8 @@ except ImportError:
 
 
 class TestGlobGroup(PackageTestCase):
+    hw_classification = HardwareClassification.GENERIC
+
     def assertMatchesGlob(self, glob: GlobGroup, candidates: Iterable[str]):
         for candidate in candidates:
             self.assertTrue(glob.matches(candidate))
@@ -41,8 +44,11 @@ class TestGlobGroup(PackageTestCase):
         )
 
     def test_one_star_partial(self):
-        glob_group = GlobGroup("fo*.bar")
-        self.assertMatchesGlob(glob_group, ["fo.bar", "foo.bar", "foobar.bar"])
+        glob_group = GlobGroup("fo*.bar")  # codespell:ignore
+        self.assertMatchesGlob(
+            glob_group,
+            ["fo.bar", "foo.bar", "foobar.bar"],  # codespell:ignore
+        )
         self.assertNotMatchesGlob(glob_group, ["oij.bar", "f.bar", "foo"])
 
     def test_one_star_multiple_in_component(self):

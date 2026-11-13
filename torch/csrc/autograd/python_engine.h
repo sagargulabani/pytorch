@@ -17,8 +17,8 @@ struct PythonEngine : public Engine {
       const std::shared_ptr<ReadyQueue>& ready_queue,
       bool should_increment) override;
   void thread_on_exception(
-      std::shared_ptr<GraphTask> graph_task,
-      const std::shared_ptr<Node>& fn,
+      const std::shared_ptr<GraphTask>& graph_task,
+      const c10::intrusive_ptr<Node>& fn,
       std::exception& e) override;
   variable_list execute(
       const edge_list& roots,
@@ -26,15 +26,18 @@ struct PythonEngine : public Engine {
       bool keep_graph,
       bool create_graph,
       bool accumulate_grad,
-      const edge_list& outputs = {}) override;
+      const edge_list& outputs = {},
+      bool disallow_implicit_grad_accumulation = false) override;
 
   c10::intrusive_ptr<at::ivalue::Future> execute_with_graph_task(
       const std::shared_ptr<GraphTask>& graph_task,
-      std::shared_ptr<Node> graph_root,
+      c10::intrusive_ptr<Node> graph_root,
       InputBuffer&& input_buffer) override;
 
   std::unique_ptr<AnomalyMetadata> make_anomaly_metadata() override;
   std::unique_ptr<SavedVariableHooks> get_default_saved_variable_hooks()
+      override;
+  std::vector<std::unique_ptr<NodeCreationHook>> get_node_creation_hooks()
       override;
 
  private:

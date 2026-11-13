@@ -1,21 +1,22 @@
 # Owner(s): ["module: unknown"]
 
-import os
 import tempfile
-import torch
 
-from backend import Model, to_custom_backend, get_custom_backend_library_path
-from torch.testing._internal.common_utils import TestCase, run_tests
+from backend import get_custom_backend_library_path, Model, to_custom_backend
+
+import torch
+from torch.testing._internal.common_utils import run_tests, TestCase
 
 
 class TestCustomBackend(TestCase):
     def setUp(self):
+        super().setUp()
         # Load the library containing the custom backend.
         self.library_path = get_custom_backend_library_path()
         torch.ops.load_library(self.library_path)
         # Create an instance of the test Module and lower it for
         # the custom backend.
-        self.model = to_custom_backend(torch.jit.script(Model()))
+        self.model = to_custom_backend(torch.jit._script.script(Model()))
 
     def test_execute(self):
         """
@@ -39,14 +40,11 @@ class TestCustomBackend(TestCase):
         self.test_execute()
 
         # Save and load.
-        f = tempfile.NamedTemporaryFile(delete=False)
-        try:
+        with tempfile.NamedTemporaryFile() as f:
             f.close()
-            torch.jit.save(self.model, f.name)
-            loaded = torch.jit.load(f.name)
-        finally:
-            os.unlink(f.name)
-        self.model = loaded
+            torch.jit._serialization.save(self.model, f.name)
+            loaded = torch.jit._serialization.load(f.name)
+            self.model = loaded
 
         # Test execution again.
         self.test_execute()

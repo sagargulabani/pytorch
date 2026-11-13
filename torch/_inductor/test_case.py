@@ -1,17 +1,31 @@
 import contextlib
-import tempfile
-import unittest
+import os
+from collections.abc import Iterator
 
 from torch._dynamo.test_case import (
     run_tests as dynamo_run_tests,
     TestCase as DynamoTestCase,
 )
-
+from torch._functorch import config as functorch_config
 from torch._inductor import config
+from torch._inductor.utils import fresh_cache
 
 
-def run_tests(needs=()):
+def run_tests(needs: str | tuple[str, ...] = ()) -> None:
     dynamo_run_tests(needs)
+
+
+@contextlib.contextmanager
+def maybe_fresh_cache() -> Iterator[None]:
+    """fresh_cache(), unless INDUCTOR_TEST_DISABLE_FRESH_CACHE=1 or TORCH_COMPILE_DEBUG=1."""
+    if (
+        os.environ.get("INDUCTOR_TEST_DISABLE_FRESH_CACHE") != "1"
+        and os.environ.get("TORCH_COMPILE_DEBUG") != "1"
+    ):
+        with fresh_cache():
+            yield
+    else:
+        yield
 
 
 class TestCase(DynamoTestCase):
@@ -20,34 +34,27 @@ class TestCase(DynamoTestCase):
     the cache directory for each test.
     """
 
-    _stack: contextlib.ExitStack
-
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        cls._stack = contextlib.ExitStack()
-        cls._stack.enter_context(config.patch({"fx_graph_cache": True}))
-
-    @classmethod
-    def tearDownClass(cls):
-        super().tearDownClass()
-        cls._stack.close()
-
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
-
-        # For all tests, mock the tmp directory populated by the inductor
-        # FxGraphCache, both for test isolation and to avoid filling disk.
-        self._inductor_cache_tmp_dir = tempfile.TemporaryDirectory()
-        self._inductor_cache_get_tmp_dir_patch = unittest.mock.patch(
-            "torch._inductor.codecache.FxGraphCache._get_tmp_dir"
+        self._inductor_test_stack = contextlib.ExitStack()
+        # A cleanup rather than tearDown, which does not run when setUp raises
+        # (e.g. skipTest). A leaked fresh_cache() otherwise exits whenever the
+        # garbage collector finalizes it.
+        self.addCleanup(self._inductor_test_stack.close)
+        self._inductor_test_stack.enter_context(
+            functorch_config.patch(
+                {
+                    "enable_autograd_cache": True,
+                }
+            )
         )
-        mock_get_dir = self._inductor_cache_get_tmp_dir_patch.start()
-        mock_get_dir.return_value = self._inductor_cache_tmp_dir.name
 
-    def tearDown(self):
-        super().tearDown()
+        if (
+            "TORCHINDUCTOR_FX_GRAPH_CACHE" not in os.environ
+            and "TORCHINDUCTOR_FX_GRAPH_CACHE_DEFAULT" not in os.environ
+        ):
+            self._inductor_test_stack.enter_context(
+                config.patch({"fx_graph_cache": True})
+            )
 
-        # Clean up the FxGraphCache tmp dir.
-        self._inductor_cache_get_tmp_dir_patch.stop()
-        self._inductor_cache_tmp_dir.cleanup()
+        self._inductor_test_stack.enter_context(maybe_fresh_cache())

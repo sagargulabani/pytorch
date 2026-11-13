@@ -9,7 +9,6 @@
 #include <c10/cuda/CUDAMathCompat.h>
 #include <c10/util/TypeSafeSignMath.h>
 #include <c10/util/generic_math.h>
-#include <ATen/native/cuda/BinaryInternal.h>
 #include <ATen/native/cuda/JitLoops.cuh>
 #include <ATen/native/cuda/Loops.cuh>
 
@@ -41,7 +40,7 @@ void div_floor_kernel_cuda(TensorIteratorBase& iter) {
         kHalf, kBFloat16, dtype, "div_floor_cuda", [&]() {
           using accscalar_t = at::acc_type<scalar_t, true>;
           auto b = iter.scalar_value<accscalar_t>(2);
-          if (C10_UNLIKELY(b == 0)) {
+          if (b == 0) [[unlikely]] {
             return div_true_kernel_cuda(iter);
           }
 
@@ -78,6 +77,6 @@ void div_floor_kernel_cuda(TensorIteratorBase& iter) {
 }
 } // namespace binary_internal
 
-REGISTER_DISPATCH(div_floor_stub, &binary_internal::div_floor_kernel_cuda);
+REGISTER_DISPATCH(div_floor_stub, &binary_internal::div_floor_kernel_cuda)
 
 } // namespace at::native

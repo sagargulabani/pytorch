@@ -76,11 +76,12 @@ def evaluate(model, criterion, data_loader):
     with torch.no_grad():
         for image, target in data_loader:
             output = model(image)
-            loss = criterion(output, target)
+
+            loss = criterion(output, target)  # noqa: F841
             acc1, acc5 = accuracy(output, target, topk=(1, 5))
             top1.update(acc1[0], image.size(0))
             top5.update(acc5[0], image.size(0))
-    print('')
+    print()
 
     return top1, top5
 
@@ -93,9 +94,9 @@ def load_model(model_file):
 
 def print_size_of_model(model):
     if isinstance(model, torch.jit.RecursiveScriptModule):
-        torch.jit.save(model, "temp.p")
+        torch.jit._serialization.save(model, "temp.p")
     else:
-        torch.jit.save(torch.jit.script(model), "temp.p")
+        torch.jit._serialization.save(torch.jit._script.script(model), "temp.p")
     print("Size (MB):", os.path.getsize("temp.p") / 1e6)
     os.remove("temp.p")
 
@@ -133,7 +134,7 @@ def training_loop(model, criterion, data_loader):
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     train_loss, correct, total = 0, 0, 0
     model.train()
-    for i in range(10):
+    for _ in range(10):
         for data, target in data_loader:
             optimizer.zero_grad()
             output = model(data)

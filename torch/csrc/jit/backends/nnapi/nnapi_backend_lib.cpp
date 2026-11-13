@@ -2,12 +2,10 @@
 
 #include <ATen/nnapi/nnapi_bind.h>
 #include <torch/csrc/jit/backends/backend.h>
-#include <torch/csrc/jit/backends/backend_exception.h>
 #include <torch/csrc/jit/mobile/import.h>
 #include <torch/csrc/jit/mobile/module.h>
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 // Implementation of Android NNAPI Backend delegate
 
@@ -16,8 +14,7 @@ namespace jit {
 // Android devices. The API is available on all Android devices running
 // Android 8.1 (API level 27) or higher.
 
-// Implementation is reflective of caffe2/torch/backends/_nnapi/prepare.py
-// NnapiModule.forward()
+// Input/output layouts follow the serialized NNAPI model format.
 class NnapiBackend : public PyTorchBackendInterface {
  public:
   // Constructor.
@@ -107,7 +104,7 @@ class NnapiBackend : public PyTorchBackendInterface {
 
   // Runs once per model initialization
   // Cannot be moved to compile(), because init() requires actual inputs
-  void init(c10::IValue handle, c10::List<at::Tensor> inputs) {
+  void init(const c10::IValue& handle, const c10::List<at::Tensor>& inputs) {
     TORCH_CHECK(comp_ == nullptr);
     auto dict = handle.toGenericDict();
 
@@ -122,7 +119,7 @@ class NnapiBackend : public PyTorchBackendInterface {
         shape_compute_module.run_method("prepare", ser_model, inputs)
             .toTensorList();
 
-    // Create and initialize NnapiComilation object
+    // Create and initialize NnapiCompilation object
     comp_ = std::make_unique<torch::nnapi::bind::NnapiCompilation>();
     auto weights = dict.at("weights").toTensorVector();
     comp_->init(ser_model, weights);
@@ -134,5 +131,4 @@ constexpr auto backend_name = "nnapi";
 static auto cls = torch::jit::backend<NnapiBackend>(backend_name);
 } // namespace
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

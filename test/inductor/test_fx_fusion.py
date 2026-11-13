@@ -1,5 +1,6 @@
 # Owner(s): ["module: inductor"]
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import torch
 from torch._inductor.fx_passes.pre_grad import (
@@ -7,12 +8,15 @@ from torch._inductor.fx_passes.pre_grad import (
     linear_transpose,
     permute_linear_fusion,
     permute_matmul_fusion,
+    remove_identity,
     sink_cat_after_pointwise,
     transpose_linear,
     transpose_matmul,
 )
 from torch._inductor.test_case import run_tests, TestCase
 from torch.fx.passes.shape_prop import ShapeProp
+from torch.testing._internal.common_utils import HardwareClassification
+
 
 PassFunc = Callable[[torch.fx.GraphModule, Any], torch.fx.GraphModule]
 
@@ -30,7 +34,7 @@ def chain_passes(*passes: PassFunc) -> PassFunc:
 
 def count_call(module: torch.fx.GraphModule, op: str, target_op: Any) -> int:
     return sum(
-        [1 if (n.op == op and n.target == target_op) else 0 for n in module.graph.nodes]
+        1 if (n.op == op and n.target == target_op) else 0 for n in module.graph.nodes
     )
 
 
@@ -43,6 +47,8 @@ def count_call_method(module: torch.fx.GraphModule, target_op: Any) -> int:
 
 
 class TestFxFusion(TestCase):
+    hw_classification = HardwareClassification.GENERIC
+
     def test_sink_cat_after_pointwise(self):
         def test_kwarg(x, y):
             return torch.cat([x, y], dim=-1).view(-1).view(128).tanh()
@@ -59,15 +65,45 @@ class TestFxFusion(TestCase):
         def test_kwarg3(x, y):
             return torch.cat(tensors=[x, y], dim=0).view(128).tanh()
 
+        def test_axis(x, y):
+            return torch.cat([x, y], axis=-1).tanh()
+
+        def test_out_none(x, y):
+            return torch.cat([x, y], dim=-1, out=None).tanh()
+
         trace_func = chain_passes(torch.fx.symbolic_trace, sink_cat_after_pointwise)
         inputs = [
             torch.randn(8, 8),
             torch.randn(8, 8),
         ]
-        for f in [test_kwarg, test_arg, test_arg2, test_kwarg2, test_kwarg3]:
+        for f in [
+            test_kwarg,
+            test_arg,
+            test_arg2,
+            test_kwarg2,
+            test_kwarg3,
+            test_axis,
+            test_out_none,
+        ]:
             traced = trace_func(f, inputs)
-            self.assertTrue(torch.allclose(f(*inputs), traced(*inputs)))
+            torch.testing.assert_close(f(*inputs), traced(*inputs))
             self.assertEqual(count_call_method(traced, "tanh"), 2)
+
+    def test_sink_cat_after_pointwise_out_kwarg(self):
+        out = torch.empty(8, 16)
+
+        def test_out(x, y):
+            return torch.cat([x, y], dim=-1, out=out).tanh()
+
+        trace_func = chain_passes(torch.fx.symbolic_trace, sink_cat_after_pointwise)
+        inputs = [
+            torch.randn(8, 8),
+            torch.randn(8, 8),
+        ]
+        traced = trace_func(test_out, inputs)
+        torch.testing.assert_close(test_out(*inputs), traced(*inputs))
+        self.assertEqual(count_call_function(traced, torch.cat), 1)
+        self.assertEqual(count_call_method(traced, "tanh"), 1)
 
     def test_linear_permute_fusion(self):
         class TestModule(torch.nn.Module):
@@ -97,7 +133,7 @@ class TestFxFusion(TestCase):
             self.assertEqual(num_linear, 0)
             self.assertEqual(num_linear_transpose, 1)
 
-            self.assertTrue(torch.allclose(module(input), traced(input)))
+            torch.testing.assert_close(module(input), traced(input))
 
     def test_permute_linear_fusion(self):
         class TestModule(torch.nn.Module):
@@ -126,7 +162,7 @@ class TestFxFusion(TestCase):
             self.assertEqual(num_linear, 0)
             self.assertEqual(num_transpose_linear, 1)
 
-            self.assertTrue(torch.allclose(module(input), traced(input)))
+            torch.testing.assert_close(module(input), traced(input))
 
     def test_permute_bmm_fusion(self):
         class TestModule(torch.nn.Module):
@@ -150,7 +186,24 @@ class TestFxFusion(TestCase):
         self.assertEqual(num_bmm, 0)
         self.assertEqual(num_transpose_matmul, 1)
 
-        self.assertTrue(torch.allclose(module(input), traced(input)))
+        torch.testing.assert_close(module(input), traced(input))
+
+    def test_remove_identity_shared_instance(self):
+        # One nn.Identity reachable under two attribute names, each with
+        # its own call_module node.
+        class M(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.id1 = self.id2 = torch.nn.Identity()
+
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        graph.output(graph.call_module("id2", (graph.call_module("id1", (x,)),)))
+        gm = remove_identity(torch.fx.GraphModule(M(), graph))
+        self.assertEqual(count_call(gm, "call_module", "id1"), 0)
+        self.assertEqual(count_call(gm, "call_module", "id2"), 0)
+        input = torch.randn(2, 4)
+        torch.testing.assert_close(gm(input), input)
 
 
 if __name__ == "__main__":

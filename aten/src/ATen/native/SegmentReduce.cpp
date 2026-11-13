@@ -4,6 +4,7 @@
 #include <ATen/core/Tensor.h>
 #include <ATen/Dispatch.h>
 #include <ATen/NumericUtils.h>
+#include <ATen/OpMathType.h>
 #include <ATen/TensorOperators.h>
 #include <c10/util/irange.h>
 
@@ -33,16 +34,16 @@ void _segment_reduce_lengths_cpu_kernel1(
     const Tensor& data,
     const T* lengths_data,
     int64_t axis,
-    const c10::optional<Scalar>& initial,
+    const std::optional<Scalar>& initial,
     Tensor& output,
     int64_t segment_count,
     int64_t lengths_stride_axis) {
   // outer_offset is the size of the outer dimensions of output (before axis)
   // inner_offset is the size of the inner dimensions of output (after axis)
   int64_t outer_offset = 1, inner_offset = 1;
-  for (int64_t d = 0; d < axis; d++)
+  for (const auto d : c10::irange(axis))
       outer_offset *= output.size(d);
-  for (int64_t d = axis + 1; d < output.dim(); d++)
+  for (const auto d : c10::irange(axis + 1, output.dim()))
       inner_offset *= output.size(d);
   int64_t lengths_size_axis = is_offsets_like ? segment_count + 1 : segment_count;
   auto data_stride_axis = data.stride(axis);
@@ -53,6 +54,7 @@ void _segment_reduce_lengths_cpu_kernel1(
       kBFloat16, kHalf, data.scalar_type(), "_segment_reduce_cpu", [&]() {
         auto* output_data = output.data_ptr<scalar_t>();
         const auto* values_data = data.const_data_ptr<scalar_t>();
+        using opmath_t = at::opmath_type<scalar_t>;
         for (const auto outer_idx : c10::irange(outer_offset)) {
           int64_t segment_start, segment_length;
           int64_t segment_end = is_offsets_like ?
@@ -70,17 +72,17 @@ void _segment_reduce_lengths_cpu_kernel1(
             }
             for (const auto inner_idx : c10::irange(inner_offset)) {
               // ===== step1: initialize starting value
-              scalar_t initial_value;
+              opmath_t initial_value = 0;
               if (initial.has_value()) {
-                initial_value = initial.value().to<scalar_t>();
+                initial_value = initial.value().to<opmath_t>();
               } else if (reduction == ReductionType::MAX) {
-                initial_value = -std::numeric_limits<scalar_t>::infinity();
+                initial_value = -std::numeric_limits<opmath_t>::infinity();
               } else if (
                   reduction == ReductionType::MEAN ||
                   reduction == ReductionType::SUM) {
                 initial_value = 0;
               } else if (reduction == ReductionType::MIN) {
-                initial_value = std::numeric_limits<scalar_t>::infinity();
+                initial_value = std::numeric_limits<opmath_t>::infinity();
               } else if (reduction == ReductionType::PROD) {
                 initial_value = 1;
               }
@@ -89,11 +91,11 @@ void _segment_reduce_lengths_cpu_kernel1(
               for (const auto j : c10::irange(segment_start, segment_end)) {
                 int64_t data_index = outer_idx * data_stride_axis * data_size_axis
                                      + j * data_stride_axis + inner_idx;
-                const auto val = values_data[data_index];
+                const auto val = static_cast<opmath_t>(values_data[data_index]);
                 if (reduction == ReductionType::MAX) {
                   initial_value = at::_isnan(val)
                       ? val
-                      : std::max<scalar_t>(initial_value, val);
+                      : std::max(initial_value, val);
                 } else if (
                     reduction == ReductionType::MEAN ||
                     reduction == ReductionType::SUM) {
@@ -101,7 +103,7 @@ void _segment_reduce_lengths_cpu_kernel1(
                 } else if (reduction == ReductionType::MIN) {
                   initial_value = at::_isnan(val)
                       ? val
-                      : std::min<scalar_t>(initial_value, val);
+                      : std::min(initial_value, val);
                 } else if (reduction == ReductionType::PROD) {
                   initial_value = initial_value * val;
                 }
@@ -112,7 +114,7 @@ void _segment_reduce_lengths_cpu_kernel1(
 
               if (segment_length == 0 && !initial.has_value() &&
                   reduction == ReductionType::MEAN) {
-                initial_value = static_cast<scalar_t>(NAN);
+                initial_value = static_cast<opmath_t>(NAN);
               } else if (
                   reduction == ReductionType::MEAN &&
                   segment_length > 0 && !at::_isnan(initial_value)) {
@@ -120,7 +122,7 @@ void _segment_reduce_lengths_cpu_kernel1(
               }
               int64_t output_index = outer_idx * output_stride_axis * output_size_axis
                                      + dim_idx * output_stride_axis + inner_idx;
-              output_data[output_index] = initial_value;
+              output_data[output_index] = static_cast<scalar_t>(initial_value);
             }
           }
         }
@@ -132,7 +134,7 @@ Tensor _segment_reduce_lengths_cpu_kernel(
     const Tensor& data,
     const Tensor& lengths,
     int64_t axis,
-    const c10::optional<Scalar>& initial) {
+    const std::optional<Scalar>& initial) {
   // data and lengths should be contiguous from the call to .contiguous in segment_reduce_kernel
   TORCH_CHECK(data.is_contiguous(), "Expected data to be contiguous.");
   TORCH_CHECK(lengths.is_contiguous(), "Expected lengths to be contiguous.");
@@ -158,7 +160,7 @@ Tensor _segment_reduce_offsets_cpu_kernel(
     const Tensor& data,
     const Tensor& offsets,
     int64_t axis,
-    const c10::optional<Scalar>& initial) {
+    const std::optional<Scalar>& initial) {
   // data and lengths should be contiguous from the call to .contiguous in segment_reduce_kernel
   TORCH_CHECK(data.is_contiguous(), "Expected data to be contiguous.");
   TORCH_CHECK(offsets.is_contiguous(), "Expected offsets to be contiguous.");
@@ -187,16 +189,16 @@ void _segment_reduce_cpu_lengths_backward_kernel1(
     ReductionType reduction,
     const T* lengths_data,
     int64_t axis,
-    const c10::optional<Scalar>& initial,
+    const std::optional<Scalar>& initial,
     Tensor& grad_input,
     int64_t segment_count,
     int64_t lengths_stride_axis) {
   // outer_offset is the size of the outer dimensions of output (before axis)
   // inner_offset is the size of the inner dimensions of output (after axis)
   int64_t outer_offset = 1, inner_offset = 1;
-  for (int64_t d = 0; d < axis; d++)
+  for (const auto d : c10::irange(axis))
       outer_offset *= output_contig.size(d);
-  for (int64_t d = axis + 1; d < output_contig.dim(); d++)
+  for (const auto d : c10::irange(axis + 1, output_contig.dim()))
       inner_offset *= output_contig.size(d);
   int64_t lengths_size_axis = is_offsets_like ? segment_count + 1 : segment_count;
   auto data_stride_axis = data_contig.stride(axis);
@@ -211,8 +213,8 @@ void _segment_reduce_cpu_lengths_backward_kernel1(
       data_contig.scalar_type(),
       "_segment_reduce_cpu",
       [&]() {
-        auto* output_data = output_contig.data_ptr<scalar_t>();
-        auto* grad_data = grad_contig.data_ptr<scalar_t>();
+        auto* output_data = output_contig.const_data_ptr<scalar_t>();
+        auto* grad_data = grad_contig.const_data_ptr<scalar_t>();
         auto* grad_input_data = grad_input.mutable_data_ptr<scalar_t>();
         const auto* values_data = data_contig.const_data_ptr<scalar_t>();
         // Used to calculate exclusive prod
@@ -323,7 +325,7 @@ Tensor _segment_reduce_cpu_lengths_backward_kernel(
     ReductionType reduction,
     const Tensor& lengths_contig,
     int64_t axis,
-    const c10::optional<Scalar>& initial) {
+    const std::optional<Scalar>& initial) {
   axis = lengths_contig.dim() - 1;
   int64_t segment_count = lengths_contig.size(axis);
   int64_t lengths_stride_axis = lengths_contig.stride(axis);
@@ -356,7 +358,7 @@ Tensor _segment_reduce_cpu_offsets_backward_kernel(
     ReductionType reduction,
     const Tensor& offsets_contig,
     int64_t axis,
-    const c10::optional<Scalar>& initial) {
+    const std::optional<Scalar>& initial) {
   axis = offsets_contig.dim() - 1;
   int64_t segment_count = offsets_contig.size(axis) - 1;
   int64_t offsets_stride_axis = offsets_contig.stride(axis);
@@ -385,13 +387,13 @@ Tensor _segment_reduce_cpu_offsets_backward_kernel(
 
 Tensor segment_reduce_kernel(
     const Tensor& data,
-    c10::string_view reduce,
-    const c10::optional<Tensor>& lengths,
-    const c10::optional<Tensor>& indices,
-    const c10::optional<Tensor>& offsets,
+    std::string_view reduce,
+    const std::optional<Tensor>& lengths,
+    const std::optional<Tensor>& indices,
+    const std::optional<Tensor>& offsets,
     int64_t axis,
     bool unsafe,
-    const c10::optional<Scalar>& initial) {
+    const std::optional<Scalar>& initial) {
   axis = maybe_wrap_dim(axis, data.ndimension());
   TORCH_CHECK(data.numel() >= 0);
 
@@ -458,39 +460,23 @@ Tensor segment_reduce_kernel(
   }
 }
 
-REGISTER_ARCH_DISPATCH(
-    _segment_reduce_lengths_stub,
-    DEFAULT,
-    &_segment_reduce_lengths_cpu_kernel);
-REGISTER_AVX2_DISPATCH(_segment_reduce_lengths_stub, &_segment_reduce_lengths_cpu_kernel);
-REGISTER_AVX512_DISPATCH(_segment_reduce_lengths_stub, &_segment_reduce_lengths_cpu_kernel);
-REGISTER_VSX_DISPATCH(_segment_reduce_lengths_stub, &_segment_reduce_lengths_cpu_kernel);
-REGISTER_ZVECTOR_DISPATCH(_segment_reduce_lengths_stub, &_segment_reduce_lengths_cpu_kernel);
-
-// offsets dispatches
-REGISTER_ARCH_DISPATCH(
-    _segment_reduce_offsets_stub,
-    DEFAULT,
-    &_segment_reduce_offsets_cpu_kernel);
-REGISTER_AVX2_DISPATCH(_segment_reduce_offsets_stub, &_segment_reduce_offsets_cpu_kernel);
-REGISTER_AVX512_DISPATCH(_segment_reduce_offsets_stub, &_segment_reduce_offsets_cpu_kernel);
-REGISTER_VSX_DISPATCH(_segment_reduce_offsets_stub, &_segment_reduce_offsets_cpu_kernel);
-REGISTER_ZVECTOR_DISPATCH(_segment_reduce_offsets_stub, &_segment_reduce_offsets_cpu_kernel);
+REGISTER_ALL_CPU_DISPATCH(_segment_reduce_lengths_stub, &_segment_reduce_lengths_cpu_kernel)
+REGISTER_ALL_CPU_DISPATCH(_segment_reduce_offsets_stub, &_segment_reduce_offsets_cpu_kernel)
 
 // Currently some computation is being duplicated across forward and backward.
-// TODO: Cache indices in forward pass to re-use in backward
+// TODO: Cache indices in forward pass to reuse in backward
 Tensor _segment_reduce_backward_kernel(
     const Tensor& grad,
     const Tensor& output,
     const Tensor& data,
-    c10::string_view reduce,
-    const c10::optional<Tensor>& lengths,
-    const c10::optional<Tensor>& offsets,
+    std::string_view reduce,
+    const std::optional<Tensor>& lengths,
+    const std::optional<Tensor>& offsets,
     int64_t axis,
-    const c10::optional<Scalar>& initial) {
+    const std::optional<Scalar>& initial) {
   axis = maybe_wrap_dim(axis, data.ndimension());
   // check that one of lengths or offsets is defined
-  // codegen for derivatives.yaml passes an undefined Tensor for None rather than a c10::optional
+  // codegen for derivatives.yaml passes an undefined Tensor for None rather than a std::optional
   // so checking .has_value() doesn't work unlike in the forward pass
   auto lengths_has_value = lengths.has_value() && lengths.value().defined();
   auto offsets_has_value = offsets.has_value() && offsets.value().defined();
@@ -530,38 +516,7 @@ Tensor _segment_reduce_backward_kernel(
   }
 }
 
-REGISTER_ARCH_DISPATCH(
-    _segment_reduce_lengths_backward_stub,
-    DEFAULT,
-    &_segment_reduce_cpu_lengths_backward_kernel);
-REGISTER_AVX512_DISPATCH(
-    _segment_reduce_lengths_backward_stub,
-    &_segment_reduce_cpu_lengths_backward_kernel);
-REGISTER_AVX2_DISPATCH(
-    _segment_reduce_lengths_backward_stub,
-    &_segment_reduce_cpu_lengths_backward_kernel);
-REGISTER_VSX_DISPATCH(
-    _segment_reduce_lengths_backward_stub,
-    &_segment_reduce_cpu_lengths_backward_kernel);
-REGISTER_ZVECTOR_DISPATCH(
-    _segment_reduce_lengths_backward_stub,
-    &_segment_reduce_cpu_lengths_backward_kernel);
-
-REGISTER_ARCH_DISPATCH(
-    _segment_reduce_offsets_backward_stub,
-    DEFAULT,
-    &_segment_reduce_cpu_offsets_backward_kernel);
-REGISTER_AVX512_DISPATCH(
-    _segment_reduce_offsets_backward_stub,
-    &_segment_reduce_cpu_offsets_backward_kernel);
-REGISTER_AVX2_DISPATCH(
-    _segment_reduce_offsets_backward_stub,
-    &_segment_reduce_cpu_offsets_backward_kernel);
-REGISTER_VSX_DISPATCH(
-    _segment_reduce_offsets_backward_stub,
-    &_segment_reduce_cpu_offsets_backward_kernel);
-REGISTER_ZVECTOR_DISPATCH(
-    _segment_reduce_offsets_backward_stub,
-    &_segment_reduce_cpu_offsets_backward_kernel);
+REGISTER_ALL_CPU_DISPATCH(_segment_reduce_lengths_backward_stub, &_segment_reduce_cpu_lengths_backward_kernel)
+REGISTER_ALL_CPU_DISPATCH(_segment_reduce_offsets_backward_stub, &_segment_reduce_cpu_offsets_backward_kernel)
 
 } // namespace at::native

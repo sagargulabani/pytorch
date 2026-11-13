@@ -11,6 +11,7 @@ Parser notes:
         - To set a label for the succeeding block, add `# @YOUR_LABEL` (Python)
           or `// @YOUR_LABEL` (C++).
 """
+# mypy: ignore-errors
 
 from core.api import GroupedModules, GroupedStmts, GroupedVariants
 from core.types import FlatIntermediateDefinition
@@ -35,7 +36,7 @@ BENCHMARKS: FlatIntermediateDefinition = flatten(
                 // @Setup
                 auto options_empty = c10::TensorOptions();
                 auto options_full = c10::TensorOptions().dtype(at::kFloat).device(at::kCPU);
-                auto optional_float = c10::make_optional(at::kFloat);
+                auto optional_float = std::make_optional(at::kFloat);
 
                 // @TensorOptions overload
                 at::empty({0}, options_empty);
@@ -43,9 +44,9 @@ BENCHMARKS: FlatIntermediateDefinition = flatten(
                 at::empty({0}, at::kFloat); // implicit conversion
 
                 // @Faithful overload
-                at::empty({0}, c10::nullopt, c10::nullopt, c10::nullopt, c10::nullopt, c10::nullopt);
-                at::empty({0}, at::kFloat, c10::nullopt, c10::nullopt, c10::nullopt, c10::nullopt);
-                at::empty({0}, optional_float, c10::nullopt, c10::nullopt, c10::nullopt, c10::nullopt);
+                at::empty({0}, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt);
+                at::empty({0}, at::kFloat, std::nullopt, std::nullopt, std::nullopt, std::nullopt);
+                at::empty({0}, optional_float, std::nullopt, std::nullopt, std::nullopt, std::nullopt);
             """
             ),
         },
@@ -215,24 +216,21 @@ BENCHMARKS: FlatIntermediateDefinition = flatten(
                 f"auto model = torch::nn::{cpp_constructor};",
                 setup=setup.value,
                 signature="f(x) -> y",
-                torchscript=torchscript,
             )
-            for setup, torchscript, (py_constructor, cpp_constructor) in (
-                (Setup.TRIVIAL_4D, True, ("BatchNorm2d(4)",) * 2),
-                (Setup.TRIVIAL_4D, True, ("GroupNorm(2, 4)",) * 2),
+            for setup, (py_constructor, cpp_constructor) in (
+                (Setup.TRIVIAL_4D, ("BatchNorm2d(4)",) * 2),
+                (Setup.TRIVIAL_4D, ("GroupNorm(2, 4)",) * 2),
                 (
                     Setup.TRIVIAL_4D,
-                    True,
                     ("LayerNorm(4)", "LayerNorm(torch::nn::LayerNormOptions({4}))"),
                 ),
-                (Setup.TRIVIAL_3D, True, ("Conv1d(4, 4, 1)",) * 2),
-                (Setup.TRIVIAL_4D, True, ("Conv2d(4, 4, 1)",) * 2),
-                (Setup.TRIVIAL_4D, True, ("MaxPool2d(2)",) * 2),
-                (Setup.TRIVIAL_2D, True, ("ReLU()",) * 2),
-                (Setup.TRIVIAL_2D, True, ("Sigmoid()",) * 2),
-                (Setup.TRIVIAL_4D, True, ("Linear(4, 2)",) * 2),
-                # TODO: LSTM can't be TorchScript'd
-                (Setup.TRIVIAL_3D, False, ("LSTM(4, 2)",) * 2),
+                (Setup.TRIVIAL_3D, ("Conv1d(4, 4, 1)",) * 2),
+                (Setup.TRIVIAL_4D, ("Conv2d(4, 4, 1)",) * 2),
+                (Setup.TRIVIAL_4D, ("MaxPool2d(2)",) * 2),
+                (Setup.TRIVIAL_2D, ("ReLU()",) * 2),
+                (Setup.TRIVIAL_2D, ("Sigmoid()",) * 2),
+                (Setup.TRIVIAL_4D, ("Linear(4, 2)",) * 2),
+                (Setup.TRIVIAL_3D, ("LSTM(4, 2)",) * 2),
             )
         },
         "training": {
@@ -248,7 +246,6 @@ BENCHMARKS: FlatIntermediateDefinition = flatten(
                 Setup.TRAINING.value,
                 num_threads=(1, 2),
                 signature=r"f(x, w0, w1) -> y",
-                torchscript=True,
                 autograd=True,
             ),
             "ensemble": GroupedStmts(
@@ -267,7 +264,6 @@ BENCHMARKS: FlatIntermediateDefinition = flatten(
                 Setup.TRAINING.value,
                 num_threads=(1, 2),
                 signature=r"f(x, y, w0, w1, w2) -> z",
-                torchscript=True,
                 autograd=True,
             ),
         },

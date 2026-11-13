@@ -11,12 +11,11 @@
 
 #include "deep_wide_pt.h"
 #include "test_utils.h"
+#include <c10/util/irange.h>
 
 using namespace torch;
 using namespace torch::jit;
 using namespace torch::jit::test;
-
-C10_DECLARE_bool(static_runtime_disable_debug_memory_overlap_check);
 
 namespace {
 
@@ -34,6 +33,12 @@ bool testCanEnableStaticRuntime(const std::string& jit_script) {
   auto graph = module.get_method("forward").graph();
 
   // here we do not freeze graph
+  return canEnableStaticRuntime(graph);
+}
+
+bool testCanEnableStaticRuntimeWithIR(const std::string& ir) {
+  auto graph = std::make_shared<Graph>();
+  parseIR(ir, graph.get(), {});
   return canEnableStaticRuntime(graph);
 }
 
@@ -345,6 +350,15 @@ TEST(StaticRuntime, CanEnableStaticRuntime) {
   EXPECT_TRUE(testCanEnableStaticRuntime(is_script_none));
   EXPECT_FALSE(testCanEnableStaticRuntime(is_not_script_tensors));
   EXPECT_TRUE(testCanEnableStaticRuntime(is_not_script_none));
+
+}
+TEST(StaticRuntime, CanEnableStaticRuntimeCallMethod) {
+  const auto call_method = R"IR(
+      graph(%x : Tensor):
+          %1 : Tensor = prim::CallMethod[name="offsets"](%x)
+          return (%1)
+  )IR";
+  EXPECT_FALSE(testCanEnableStaticRuntimeWithIR(call_method));
 }
 
 TEST(StaticRuntime, CanEnableStaticRuntimeSubBlocks) {
@@ -474,7 +488,7 @@ TEST(StaticRuntime, DeepWide) {
   torch::jit::StaticModule smod(mod);
 
   for (int batch_size : {1, 8, 32}) {
-    for (int i = 0; i < 2; ++i) {
+    for ([[maybe_unused]] const auto _ : c10::irange(2)) {
       auto ad_emb_packed = torch::randn({batch_size, 1, embedding_size});
       auto user_emb = torch::randn({batch_size, 1, embedding_size});
       auto wide = torch::randn({batch_size, num_features});
@@ -502,7 +516,7 @@ TEST(StaticRuntime, KWargsAPI_1) {
   torch::jit::StaticModule smod(module);
 
   for (int batch_size : {1, 8, 32}) {
-    for (int i = 0; i < 2; ++i) {
+    for ([[maybe_unused]] const auto _ : c10::irange(2)) {
       auto ad_emb_packed = torch::randn({batch_size, 1, embedding_size});
       auto user_emb = torch::randn({batch_size, 1, embedding_size});
       auto wide = torch::randn({batch_size, num_features});
@@ -543,7 +557,7 @@ TEST(StaticRuntime, KWargsAPI_2) {
   torch::jit::StaticModule smod(module);
 
   for (int batch_size : {1, 8, 32}) {
-    for (int i = 0; i < 2; ++i) {
+    for ([[maybe_unused]] const auto _ : c10::irange(2)) {
       auto ad_emb_packed = torch::randn({batch_size, 1, embedding_size});
       auto user_emb = torch::randn({batch_size, 1, embedding_size});
       auto wide = torch::randn({batch_size, num_features});
@@ -624,7 +638,7 @@ TEST(StaticRuntime, CleanUpMemory) {
         torch::jit::StaticRuntime runtime(smod);
 
         for (int batch_size : {1, 8, 32}) {
-          for (int i = 0; i < 2; ++i) {
+          for ([[maybe_unused]] const auto _ : c10::irange(2)) {
             auto ad_emb_packed = torch::randn({batch_size, 1, embedding_size});
             auto user_emb = torch::randn({batch_size, 1, embedding_size});
             auto wide = torch::randn({batch_size, num_features});
@@ -865,7 +879,7 @@ TEST(StaticRuntime, FusionPass) {
   const int embedding_size = 32;
   const int num_features = 50;
   for (int batch_size : {1, 8, 32}) {
-    for (int i = 0; i < 2; ++i) {
+    for ([[maybe_unused]] const auto _ : c10::irange(2)) {
       torch::jit::Module module = getDeepAndWideSciptModel();
       auto ad_emb_packed = torch::randn({batch_size, 1, embedding_size});
       auto user_emb = torch::randn({batch_size, 1, embedding_size});
@@ -1257,6 +1271,59 @@ TEST(ManagedTensorRanges, OverlappingLifetimesOutputs) {
   auto ranges = ManagedTensorRanges(*graph->block(), alias_db, {b, output});
 
   EXPECT_TRUE(ranges.lifetimesOverlap(b, output));
+}
+
+TEST(ManagedTensorRanges, LifetimeIncludeSubBlockInputs) {
+  const std::string src_plain = R"IR(
+    graph(%cond : bool, %a : Tensor):
+        %b : Tensor = aten::mul(%a, %a)
+        %output : bool = prim::If(%cond)
+          block0():
+            -> (%a)
+          block1():
+            %c : Tensor = aten::mul(%b, %a)
+            -> (%c)
+        return (%output)
+  )IR";
+  const std::string src_recursive = R"IR(
+    graph(%cond : bool, %a : Tensor):
+        %b : Tensor = aten::mul(%a, %a)
+        %output : bool = prim::If(%cond)
+          block0():
+            -> (%a)
+          block1():
+            %outputblock1 : bool = prim::If(%cond)
+              block0():
+                -> (%a)
+              block1():
+                %c : Tensor = aten::mul(%b, %a)
+                -> (%c)
+            -> (%outputblock1)
+        return (%output)
+  )IR";
+
+  for (const auto& src : {src_plain, src_recursive}) {
+    auto graph = std::make_shared<Graph>();
+    std::unordered_map<std::string, Value*> vmap;
+    parseIR(src, graph.get(), vmap);
+
+    auto* b = vmap["b"];
+
+    FastSet<const Value*> managed_tensors = {b};
+    AliasDb alias_db(graph);
+    auto ranges = ManagedTensorRanges(*graph->block(), alias_db, managed_tensors);
+
+    std::vector<Node*> nodes(
+        graph->block()->nodes().begin(), graph->block()->nodes().end());
+    ASSERT_EQ(nodes.size(), 2);
+
+    EXPECT_FALSE(ranges.nodeFreesManagedTensors(nodes[0]));
+
+    EXPECT_TRUE(ranges.nodeFreesManagedTensors(nodes[1]));
+    EXPECT_EQ(
+        ranges.availableTensorValuesAfterNode(nodes[1]),
+        std::vector<const Value*>{b});
+  }
 }
 
 namespace {

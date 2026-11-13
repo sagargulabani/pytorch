@@ -1,4 +1,4 @@
-# Owner(s): ["oncall: package/deploy"]
+# Owner(s): ["module: package/deploy"]
 
 from io import BytesIO
 from textwrap import dedent
@@ -7,6 +7,7 @@ from unittest import skipIf
 import torch
 from torch.package import PackageExporter, PackageImporter, sys_importer
 from torch.testing._internal.common_utils import IS_FBCODE, IS_SANDCASTLE, run_tests
+
 
 try:
     from torchvision.models import resnet18
@@ -23,7 +24,10 @@ except ImportError:
     from common import PackageTestCase
 
 
-@skipIf(True, "Does not work with recent torchvision, see https://github.com/pytorch/pytorch/issues/81115")
+@skipIf(
+    True,
+    "Does not work with recent torchvision, see https://github.com/pytorch/pytorch/issues/81115",
+)
 @skipIfNoTorchVision
 class ModelTest(PackageTestCase):
     """End-to-end tests packaging an entire model."""
@@ -55,7 +59,7 @@ class ModelTest(PackageTestCase):
         self.assertEqual(r2(input), ref)
 
         # functions exist also to get at the private modules in each package
-        torchvision = i.import_module("torchvision")
+        torchvision = i.import_module("torchvision")  # noqa: F841
 
         f2 = BytesIO()
         # if we are doing transfer learning we might want to re-save
@@ -88,14 +92,13 @@ class ModelTest(PackageTestCase):
 
     @skipIfNoTorchVision
     def test_model_save(self):
-
         # This example shows how you might package a model
         # so that the creator of the model has flexibility about
         # how they want to save it but the 'server' can always
         # use the same API to load the package.
 
-        # The convension is for each model to provide a
-        # 'model' package with a 'load' function that actual
+        # The convention is for each model to provide a
+        # 'model' package with a 'load' function that actually
         # reads the model out of the archive.
 
         # How the load function is implemented is up to the
@@ -120,7 +123,7 @@ class ModelTest(PackageTestCase):
                 import torch_package_importer as resources
 
                 # server knows to call model.load() to get the model,
-                # maybe in the future it passes options as arguments by convension
+                # maybe in the future it passes options as arguments by convention
                 def load():
                     return resources.load_pickle('model', 'pickled')
                 """
@@ -163,35 +166,6 @@ class ModelTest(PackageTestCase):
             results.append(r)
 
         self.assertEqual(*results)
-
-    @skipIfNoTorchVision
-    def test_script_resnet(self):
-        resnet = resnet18()
-
-        f1 = BytesIO()
-        # Option 1: save by pickling the whole model
-        # + single-line, similar to torch.jit.save
-        # - more difficult to edit the code after the model is created
-        with PackageExporter(f1) as e:
-            e.intern("**")
-            e.save_pickle("model", "pickled", resnet)
-
-        f1.seek(0)
-
-        i = PackageImporter(f1)
-        loaded = i.load_pickle("model", "pickled")
-
-        # Model should script successfully.
-        scripted = torch.jit.script(loaded)
-
-        # Scripted model should save and load successfully.
-        f2 = BytesIO()
-        torch.jit.save(scripted, f2)
-        f2.seek(0)
-        loaded = torch.jit.load(f2)
-
-        input = torch.rand(1, 3, 224, 224)
-        self.assertEqual(loaded(input), resnet(input))
 
 
 if __name__ == "__main__":

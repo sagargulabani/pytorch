@@ -1,8 +1,7 @@
 #include <caffe2/utils/threadpool/pthreadpool-cpp.h>
 #include <caffe2/utils/threadpool/thread_pool_guard.h>
+#include <caffe2/utils/threadpool/ThreadPool.h>
 #include <c10/util/Exception.h>
-
-#include <atomic>
 
 namespace {
 // After fork, the child process inherits the data-structures of the parent
@@ -82,19 +81,16 @@ void PThreadPool::run(
       0u);
 }
 
-// Forward declaration
-size_t getDefaultNumThreads();
-
-PThreadPool* pthreadpool() {
+PThreadPool* pthreadpool(size_t thread_count) {
   static auto threadpool =
-    std::make_unique<PThreadPool>(getDefaultNumThreads());
+    std::make_unique<PThreadPool>(thread_count);
 #if !(defined(WIN32))
   static std::once_flag flag;
   std::call_once(flag, []() {
     pthread_atfork(nullptr, nullptr, child_atfork);
   });
 #endif
-  if (C10_UNLIKELY(leak_corrupted_threadpool)) {
+  if (leak_corrupted_threadpool) [[unlikely]] {
     leak_corrupted_threadpool = false;
     if (auto leaked = threadpool.release()) {
       auto num_threads = leaked->get_thread_count();
@@ -103,6 +99,10 @@ PThreadPool* pthreadpool() {
     }
   }
   return threadpool.get();
+}
+
+PThreadPool* pthreadpool() {
+  return pthreadpool(getDefaultNumThreads());
 }
 
 pthreadpool_t pthreadpool_() {

@@ -3,16 +3,21 @@ import sys
 from tempfile import NamedTemporaryFile
 
 import torch.package.package_exporter
-from torch.testing._internal.common_utils import IS_WINDOWS, TestCase
+from torch.testing._internal.common_utils import (
+    IS_WINDOWS,
+    preserves_unittest_skip_marks,
+    TestCase,
+)
 
 
+@preserves_unittest_skip_marks()
 class PackageTestCase(TestCase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._temporary_files = []
 
     def temp(self):
-        t = NamedTemporaryFile()
+        t = NamedTemporaryFile()  # noqa: SIM115
         name = t.name
         if IS_WINDOWS:
             t.close()  # can't read an open file in windows

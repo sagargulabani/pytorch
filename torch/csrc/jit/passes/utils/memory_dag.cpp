@@ -2,10 +2,8 @@
 
 #include <c10/util/flat_hash_map.h>
 #include <algorithm>
-#include <queue>
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 namespace {
 
 void makePointerToImpl(Element* from, Element* to) {
@@ -56,7 +54,7 @@ bool MemoryDAG::mayContainAlias(const Element* a, const Element* b) const {
 
 const MemoryLocations& MemoryDAG::getAllContainedMemoryLocations(
     const Element* elem) const {
-  if (C10_UNLIKELY(!elem->cachedAllContainedMemoryLocations_.has_value())) {
+  if (!elem->cachedAllContainedMemoryLocations_.has_value()) [[unlikely]] {
     MemoryLocations cache;
     elem->cachedAllContainedMemoryLocations_ = MemoryLocations();
     collectAllContainedMemoryLocationsImpl(
@@ -74,7 +72,7 @@ void MemoryDAG::collectAllContainedMemoryLocations(
     return;
   }
 
-  if (C10_UNLIKELY(!elem->cachedAllContainedMemoryLocations_.has_value())) {
+  if (!elem->cachedAllContainedMemoryLocations_.has_value()) [[unlikely]] {
     MemoryLocations cache;
     collectAllContainedMemoryLocationsImpl(elem, cache);
     elem->cachedAllContainedMemoryLocations_ = std::move(cache);
@@ -232,5 +230,4 @@ void MemoryDAG::setWildcards(
 Element* MemoryDAG::unsafeMakeFreshValue(const Value* v) {
   return makeFreshValueImpl(v, indexToElementMap_);
 }
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

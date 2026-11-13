@@ -2,19 +2,36 @@
 
 #ifdef USE_C10D_GLOO
 
+#include <array>
+#include <optional>
+
 #include <torch/csrc/distributed/c10d/ProcessGroupGloo.hpp>
 #include <torch/csrc/distributed/c10d/Types.hpp>
 #include <torch/csrc/distributed/c10d/Utils.hpp>
 
 namespace c10d {
 
+// Returns Python GC counters in generation order:
+// [generation 0, generation 1, generation 2].
+// Registered by the Python bindings when available.
+typedef std::optional<std::array<int64_t, 3>> (*gc_count_getter_t)();
+
+TORCH_API gc_count_getter_t& get_gc_count_getter();
+
+// ProcessGroupWrapper wraps a Backend for debugging purposes. It intercepts
+// collective operations to verify consistency across ranks before dispatching
+// to the wrapped backend.
+//
+// IMPORTANT: This wrapper must forward all Backend virtual methods to backend_.
+// When adding new virtual methods to Backend that are overridden by backends
+// like ProcessGroupNCCL, you must also add forwarding methods here. Otherwise,
+// those methods will fail when TORCH_DISTRIBUTED_DEBUG=DETAIL is set.
+// See https://github.com/pytorch/pytorch/issues/173538 for an example.
 class TORCH_API ProcessGroupWrapper : public Backend {
  public:
   explicit ProcessGroupWrapper(
-      c10::intrusive_ptr<Backend> backend,
+      const c10::intrusive_ptr<Backend>& backend,
       c10::intrusive_ptr<Backend> glooBackend);
-
-  const std::string getBackendName() const override;
 
   c10::intrusive_ptr<Work> broadcast(
       std::vector<at::Tensor>& data,
@@ -22,6 +39,10 @@ class TORCH_API ProcessGroupWrapper : public Backend {
 
   c10::intrusive_ptr<Work> allreduce(
       std::vector<at::Tensor>& data,
+      const AllreduceOptions& opts = AllreduceOptions()) override;
+
+  c10::intrusive_ptr<Work> allreduce_sparse(
+      std::vector<at::Tensor>& tensors,
       const AllreduceOptions& opts = AllreduceOptions()) override;
 
   c10::intrusive_ptr<Work> allreduce_coalesced(
@@ -38,7 +59,7 @@ class TORCH_API ProcessGroupWrapper : public Backend {
       std::vector<at::Tensor>& inputTensors,
       const AllgatherOptions& opts = AllgatherOptions()) override;
 
-  c10::intrusive_ptr<Work> _allgather_base(
+  c10::intrusive_ptr<Work> all_gather_single(
       at::Tensor& outputBuffer,
       at::Tensor& inputBuffer,
       const AllgatherOptions& opts = AllgatherOptions()) override;
@@ -50,6 +71,11 @@ class TORCH_API ProcessGroupWrapper : public Backend {
   c10::intrusive_ptr<Work> allgather_coalesced(
       std::vector<std::vector<at::Tensor>>& outputTensorLists,
       std::vector<at::Tensor>& inputTensors,
+      const AllgatherOptions& opts = AllgatherOptions()) override;
+
+  c10::intrusive_ptr<Work> all_gather_single_coalesced(
+      std::vector<at::Tensor>& outputs,
+      std::vector<at::Tensor>& inputs,
       const AllgatherOptions& opts = AllgatherOptions()) override;
 
   c10::intrusive_ptr<Work> gather(
@@ -67,7 +93,17 @@ class TORCH_API ProcessGroupWrapper : public Backend {
       std::vector<std::vector<at::Tensor>>& inputTensors,
       const ReduceScatterOptions& opts = ReduceScatterOptions()) override;
 
-  c10::intrusive_ptr<Work> alltoall_base(
+  c10::intrusive_ptr<Work> reduce_scatter_single(
+      at::Tensor& inputBuffer,
+      at::Tensor& outputBuffer,
+      const ReduceScatterOptions& opts = ReduceScatterOptions()) override;
+
+  c10::intrusive_ptr<Work> reduce_scatter_single_coalesced(
+      std::vector<at::Tensor>& outputs,
+      std::vector<at::Tensor>& inputs,
+      const ReduceScatterOptions& opts = ReduceScatterOptions()) override;
+
+  c10::intrusive_ptr<Work> all_to_all_single(
       at::Tensor& outputTensor,
       at::Tensor& inputTensor,
       std::vector<int64_t>& outputSplitSizes,
@@ -81,12 +117,6 @@ class TORCH_API ProcessGroupWrapper : public Backend {
 
   void monitoredBarrier(const BarrierOptions& opts, bool waitAllRanks = false)
       override;
-
-  // Agrees on an initial sequence number for the whole group by having rank 0
-  // create it and broadcast it to other ranks using the store. Only implemented
-  // for GLOO and NCCL backends currently.
-  // dont implement this
-  void setSequenceNumberForGroup() override;
 
   // Retrieves the current sequence number for the whole group, which should be
   // in sync. If the returned number is not consistent across the group, it
@@ -109,15 +139,54 @@ class TORCH_API ProcessGroupWrapper : public Backend {
 
   c10::intrusive_ptr<Work> barrier(
       const BarrierOptions& opts = BarrierOptions()) override;
+  void registerOnCompletionHook(
+      std::function<void(std::shared_ptr<WorkInfo>)>&& hook) override;
 
-  c10::intrusive_ptr<Work> _reduce_scatter_base(
-      at::Tensor& outputBuffer,
-      at::Tensor& inputBuffer,
-      const ReduceScatterOptions& opts) override;
+  void waitForPendingWorks() override;
+  void enableCollectivesTiming() override;
+  bool collectivesTimingEnabled() const override;
 
+  c10::intrusive_ptr<Backend> split(
+      const c10::intrusive_ptr<Store>& store,
+      const std::vector<int>& ranks,
+      const c10::intrusive_ptr<Options>& opts) override;
+
+  c10::intrusive_ptr<Backend> merge(
+      const c10::intrusive_ptr<Store>& store,
+      const c10::intrusive_ptr<Options>& opts,
+      const int& rank,
+      const int& size) override;
+
+  // Forward methods to wrapped backend
+  bool supportsSplitting() const override;
+  bool isInitialized() override;
+  bool supportsCoalescing() const override;
+  bool supportsTimeEstimation() const override;
+  void startTimeEstimate() override;
+  float endTimeEstimate() override;
+  bool supportsShrinking() const override;
+  c10::intrusive_ptr<Backend> shrink(
+      const std::vector<int64_t>& ranks_to_exclude,
+      int shrink_flags = 0,
+      const c10::intrusive_ptr<Options>& opts_override = nullptr) override;
+  void setTimeout(std::chrono::milliseconds timeout) override;
   void startCoalescing() override;
-
   c10::intrusive_ptr<Work> endCoalescing() override;
+  const std::string getBackendName() const override;
+  c10::intrusive_ptr<Options> getBackendOptions() override;
+  std::shared_ptr<c10::Allocator> getMemAllocator() override;
+  at::Tensor allocateTensor(long size, at::TensorOptions options = {}) override;
+  bool supportsTensorAlloc(c10::DeviceIndex deviceIdx) override;
+  void abort() override;
+  void shutdown() override;
+  void suspend() override;
+  void resume() override;
+  std::unordered_map<std::string, uint64_t> getMemoryStats() override;
+
+  ErrorType getError() override;
+  std::optional<at::Device> getBoundDeviceId() const override;
+  void setBoundDeviceId(std::optional<at::Device> device) override;
+  void eagerConnectSingleDevice(at::Device device) override;
 
   c10::intrusive_ptr<Backend> getWrappedPg() const;
 

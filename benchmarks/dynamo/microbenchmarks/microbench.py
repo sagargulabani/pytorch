@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
+
 import argparse
 import inspect
 import sys
 
 import numpy as np
 import tabulate
-import torch
 
+import torch
 import torch._inductor
 from torch._dynamo.backends.cudagraphs import cudagraphs_inner
 from torch._dynamo.testing import same
 from torch._inductor.compile_fx import compile_fx
 from torch._inductor.utils import timed
+
+
+aten = torch.ops.aten
 
 try:
     import test.test_torchinductor as tti
@@ -23,7 +27,8 @@ def compute_speedups(args, models, example_inputs):
     expected = models[0](*example_inputs)
     for model in models[1:]:
         actual = model(*example_inputs)
-        assert same(actual, expected), expected[0] - actual[0]
+        if not same(actual, expected):
+            raise AssertionError(f"Output mismatch: diff={expected[0] - actual[0]}")
 
     timings = np.zeros((args.repeat, len(models)), np.float64)
     for rep in range(args.repeat):
@@ -38,7 +43,9 @@ def microbenchmark(args, model, example_inputs):
     compiled_fn = compile_fx(torch.fx.symbolic_trace(model), example_inputs)
     cudagraphs_eager = cudagraphs_inner(model, example_inputs, copy_outputs=False)
     cudagraphs_jit = cudagraphs_inner(
-        torch.jit.trace(model, example_inputs), example_inputs, copy_outputs=False
+        torch.jit._trace.trace(model, example_inputs),
+        example_inputs,
+        copy_outputs=False,
     )
     return compute_speedups(
         args,
@@ -86,6 +93,10 @@ class MicroBenchmarks:
     @staticmethod
     def sum(a, b):
         return ((a + b).sum(),)
+
+    @staticmethod
+    def view(x):
+        return (aten.alias(x),)
 
 
 def main():
@@ -142,7 +153,7 @@ def main():
     torch._inductor.config.triton.autotune_pointwise = True
 
     rows = []
-    for model in (MicroBenchmarks.sum,):
+    for model in (MicroBenchmarks.sum, MicroBenchmarks.view):
         nargs = len(inspect.signature(model).parameters)
         for device in args.devices:
             for n in args.size:

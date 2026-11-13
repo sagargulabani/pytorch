@@ -3,14 +3,14 @@ from torch._inductor.codegen.common import DeviceOpOverrides
 from torch._inductor.scheduler import BaseScheduling
 
 
-class ExtensionWrapperCodegen(wrapper.WrapperCodeGen):
-    def __init__(self):
-        super().__init__()
+class ExtensionWrapperCodegen(wrapper.PythonWrapperCodegen):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
 
 class ExtensionScheduling(BaseScheduling):
     def __init__(self, scheduler):
-        self.scheduler = scheduler
+        super().__init__(scheduler)
         self._triton_scheduling = triton.TritonScheduling(scheduler)
 
     def can_fuse_vertical(self, node1, node2):
@@ -25,8 +25,8 @@ class ExtensionScheduling(BaseScheduling):
     def codegen_template(self, template_node, epilogue_nodes):
         pass
 
-    def codegen_nodes(self, nodes):
-        self._triton_scheduling.codegen_nodes(nodes)
+    def codegen_node(self, node):
+        self._triton_scheduling.codegen_node(node)
 
     def codegen_sync(self):
         pass
@@ -39,11 +39,11 @@ class CPUDeviceOpOverrides(DeviceOpOverrides):
     def import_get_raw_stream_as(self, name: str) -> str:
         return f"def {name}(name): None\n"
 
-    def set_device(self, device_idx: int) -> str:  # noqa: ARG002 unused-argument
+    def set_device(self, device_idx: int) -> str:
         return ""
 
     def synchronize(self) -> None:
         pass
 
-    def device_guard(self, device_idx: int) -> str:  # noqa: ARG002 unused-argument
+    def device_guard(self, device_idx: int) -> str:
         return ""

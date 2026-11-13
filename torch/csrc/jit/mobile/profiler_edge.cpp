@@ -2,12 +2,11 @@
 #include <c10/util/Exception.h>
 #include <c10/util/overloaded.h>
 #include <torch/csrc/jit/mobile/profiler_edge.h>
+#include <exception>
 #include <string>
 #include <vector>
 
-namespace torch {
-namespace jit {
-namespace mobile {
+namespace torch::jit::mobile {
 
 thread_local KinetoEdgeCPUProfiler* tls_edge_profiler{nullptr};
 
@@ -24,7 +23,7 @@ KinetoEdgeCPUProfiler::KinetoEdgeCPUProfiler(
     : m_(m), trace_file_name_(fname) {
   torch::profiler::impl::ExperimentalConfig experimental_config;
   // Enable hardware counters
-  if (events.size()) {
+  if (!events.empty()) {
     experimental_config.performance_events = std::move(events);
   }
 
@@ -124,12 +123,17 @@ KinetoEdgeCPUProfiler::getProfilerResult() {
 }
 
 KinetoEdgeCPUProfiler::~KinetoEdgeCPUProfiler() {
-  if (!trace_file_name_.empty()) {
-    if (profiler_result_) {
-      profiler_result_->save(trace_file_name_);
-    } else {
-      torch::autograd::profiler::disableProfiler()->save(trace_file_name_);
+  // A destructor must not throw, so a failed save only warns.
+  try {
+    if (!trace_file_name_.empty()) {
+      if (profiler_result_) {
+        profiler_result_->save(trace_file_name_);
+      } else {
+        torch::autograd::profiler::disableProfiler()->save(trace_file_name_);
+      }
     }
+  } catch (const std::exception& e) {
+    TORCH_WARN("Failed to save the edge profiler trace: ", e.what());
   }
   tls_edge_profiler = nullptr;
 }
@@ -138,6 +142,4 @@ KinetoEdgeCPUProfiler* getCurrentEdgeProfiler() {
   return tls_edge_profiler;
 }
 
-} // namespace mobile
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit::mobile

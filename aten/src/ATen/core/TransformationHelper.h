@@ -56,7 +56,7 @@ C10_HOST_DEVICE inline T uniform_int_full_range(V val) {
  * in this overloaded version
  */
 template <typename T, typename V>
-C10_HOST_DEVICE inline std::enable_if_t<!(std::is_floating_point_v<T>), T>uniform_int(V val) {
+C10_HOST_DEVICE inline std::enable_if_t<!std::is_floating_point_v<T>, T>uniform_int(V val) {
   if constexpr (std::is_same_v<T, bool>) {
     return static_cast<bool>(val & 1);
   } else if constexpr (std::is_same_v<T, int64_t>) {
@@ -117,7 +117,7 @@ C10_HOST_DEVICE inline T cauchy(T val, T median, T sigma) {
 template <>
 C10_HOST_DEVICE inline double cauchy(double val, double median, double sigma) {
   // https://en.wikipedia.org/wiki/Cauchy_distribution#Cumulative_distribution_function
-  return median + sigma * at::tan(c10::pi<double> * (val - static_cast<double>(0.5)));
+  return median + sigma * at::tan(c10::pi<double> * (val - 0.5));
 }
 
 /**
@@ -133,7 +133,7 @@ C10_HOST_DEVICE inline T exponential(T val, T lambda) {
 #if defined(__CUDACC__) || defined(__HIPCC__)
       // BEFORE TOUCHING THIS CODE READ: https://github.com/pytorch/pytorch/issues/16706
       // curand_uniform has (0,1] bounds. log(1) is 0 and exponential excludes 0.
-      // we need log to be not 0, and not underflow when converted to half
+      // on CUDA/ROCm only double gets here; see standard_exponential in native/cuda/DistributionTemplates.h
       // fast __logf approximation can underflow, so set log to -epsilon/2 for 1 or close to 1 args
   auto log = val >= static_cast<T>(1.) - std::numeric_limits<T>::epsilon() / 2
       ? -std::numeric_limits<T>::epsilon() / 2

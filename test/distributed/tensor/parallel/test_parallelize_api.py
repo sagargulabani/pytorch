@@ -1,38 +1,41 @@
 # Owner(s): ["oncall: distributed"]
 from collections import OrderedDict
+from copy import deepcopy
 
 import torch
-from torch.distributed._tensor import DeviceMesh, DTensor, Replicate, Shard
-from torch.distributed.tensor.parallel.api import (
-    parallelize_module,
-)
+from torch.distributed.tensor import DeviceMesh, DTensor, Replicate, Shard
+from torch.distributed.tensor.debug import CommDebugMode
+from torch.distributed.tensor.parallel.api import parallelize_module
 from torch.distributed.tensor.parallel.style import (
     ColwiseParallel,
     PrepareModuleInput,
+    PrepareModuleInputOutput,
     PrepareModuleOutput,
     RowwiseParallel,
 )
 from torch.testing._internal.common_utils import run_tests
 from torch.testing._internal.distributed._tensor.common_dtensor import (
-    DTensorTestBase,
+    create_local_tensor_test_class,
+    DTensorContinuousTestBase,
+    LocalDTensorContinuousTestBase,
+    map_local_tensor_for_rank,
     MLPModule,
+    MLPStacked,
     with_comms,
 )
 
 
 class DummyModule(torch.nn.Module):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
 
     def forward(self, x):
         return x
 
 
-class TensorParallelAPITests(DTensorTestBase):
-    @property
-    def world_size(self):
-        gpu_num = torch.cuda.device_count()
-        return gpu_num if gpu_num % 2 == 0 and gpu_num > 4 else 4
+class TensorParallelAPITests(DTensorContinuousTestBase):
+    _gpu_num = torch.accelerator.device_count()
+    world_size = _gpu_num if _gpu_num % 2 == 0 and _gpu_num > 4 else 4
 
     def _compare_params(
         self,
@@ -51,7 +54,7 @@ class TensorParallelAPITests(DTensorTestBase):
                 (not rank0_only)
                 or (self.rank == 0)
                 or (
-                    name not in ["net2.bias"]
+                    name != "net2.bias"
                     and not skip_rowwise_bias
                     or name not in ["bias", "net2.bias"]
                 )
@@ -61,7 +64,7 @@ class TensorParallelAPITests(DTensorTestBase):
                     dist_param.redistribute(
                         device_mesh=dist_param.device_mesh, placements=replicate
                     ).to_local(),
-                    f"{name} not equal between dist and non-dist",
+                    lambda msg: f"{msg}\n{name} not equal between dist and non-dist",
                 )
 
     def _compare_module(
@@ -76,7 +79,14 @@ class TensorParallelAPITests(DTensorTestBase):
 
         # check forward correctness
         local_output = local_module(inp)
-        inp = inp.chunk(self.world_size, dim=-1)[self.rank] if rowwise else inp
+        inp = map_local_tensor_for_rank(
+            inp,
+            self.rank,
+            lambda inp, rank: inp.chunk(self.world_size, dim=-1)[rank]
+            if rowwise
+            else inp,
+        )
+        # inp = inp.chunk(self.world_size, dim=-1)[self.rank] if rowwise else inp
         dist_output = dist_module(inp)
         dist_output = (
             dist_output.redistribute(dist_output.device_mesh, [Replicate()]).to_local()
@@ -99,13 +109,7 @@ class TensorParallelAPITests(DTensorTestBase):
     def test_parallelize_mlp_with_module_api(self):
         inp_size = [12, 10]
         model = MLPModule(self.device_type)
-        model_tp = MLPModule(self.device_type)
-
-        # Ensure model are initialized the same way.
-        self.assertEqual(model.net1.weight, model_tp.net1.weight)
-        self.assertEqual(model.net1.bias, model_tp.net1.bias)
-        self.assertEqual(model.net2.weight, model_tp.net2.weight)
-        self.assertEqual(model.net2.bias, model_tp.net2.bias)
+        model_tp = deepcopy(model)
 
         # Parallelize module.
         device_mesh = DeviceMesh(self.device_type, torch.arange(self.world_size))
@@ -125,23 +129,7 @@ class TensorParallelAPITests(DTensorTestBase):
         model = torch.nn.Sequential(
             OrderedDict([("dummy_encoder", MLPModule(self.device_type))])
         )
-        model_tp = torch.nn.Sequential(
-            OrderedDict([("dummy_encoder", MLPModule(self.device_type))])
-        )
-
-        # Ensure model are initialized the same way.
-        self.assertEqual(
-            model.dummy_encoder.net1.weight, model_tp.dummy_encoder.net1.weight
-        )
-        self.assertEqual(
-            model.dummy_encoder.net1.bias, model_tp.dummy_encoder.net1.bias
-        )
-        self.assertEqual(
-            model.dummy_encoder.net2.weight, model_tp.dummy_encoder.net2.weight
-        )
-        self.assertEqual(
-            model.dummy_encoder.net2.bias, model_tp.dummy_encoder.net2.bias
-        )
+        model_tp = deepcopy(model)
 
         # Parallelize module.
         device_mesh = DeviceMesh(self.device_type, torch.arange(self.world_size))
@@ -163,8 +151,7 @@ class TensorParallelAPITests(DTensorTestBase):
 
         torch.manual_seed(5)
         model = torch.nn.Linear(16, 10, device=self.device_type)
-        torch.manual_seed(5)
-        model_tp = torch.nn.Linear(16, 10, device=self.device_type)
+        model_tp = deepcopy(model)
 
         # parallelize model_tp
         device_mesh = DeviceMesh(self.device_type, list(range(self.world_size)))
@@ -182,8 +169,7 @@ class TensorParallelAPITests(DTensorTestBase):
 
         torch.manual_seed(5)
         model = torch.nn.Linear(10, 16, device=self.device_type)
-        torch.manual_seed(5)
-        model_tp = torch.nn.Linear(10, 16, device=self.device_type)
+        model_tp = deepcopy(model)
 
         # parallelize model_tp
         device_mesh = DeviceMesh(self.device_type, list(range(self.world_size)))
@@ -199,9 +185,8 @@ class TensorParallelAPITests(DTensorTestBase):
             module,
             device_mesh,
             PrepareModuleInput(
-                input_layouts=Shard(0),
-                desired_input_layouts=Replicate()
-            )
+                input_layouts=Shard(0), desired_input_layouts=Replicate()
+            ),
         )
         inp = torch.rand(5, 7, device=self.device_type)
         output = module(inp).redistribute(device_mesh, [Shard(0)]).to_local()
@@ -215,9 +200,8 @@ class TensorParallelAPITests(DTensorTestBase):
             module,
             device_mesh,
             PrepareModuleOutput(
-                output_layouts=Replicate(),
-                desired_output_layouts=Shard(0)
-            )
+                output_layouts=Replicate(), desired_output_layouts=Shard(0)
+            ),
         )
         torch.manual_seed(15)
         inp = torch.rand(16, 7, device=self.device_type)
@@ -225,6 +209,217 @@ class TensorParallelAPITests(DTensorTestBase):
         output = module(dtensor)
         inp = dtensor.redistribute(device_mesh, [Shard(0)]).to_local()
         self.assertEqual(inp, output)
+
+    @with_comms
+    def test_prepare_module_input_output(self):
+        module = DummyModule()
+        device_mesh = DeviceMesh(self.device_type, list(range(self.world_size)))
+        parallelize_module(
+            module,
+            device_mesh,
+            PrepareModuleInputOutput(
+                input_layouts=Shard(0),
+                desired_input_layouts=Replicate(),
+                output_layouts=Replicate(),
+                desired_output_layouts=Shard(1),
+            ),
+        )
+        inp = torch.rand(5, 7, device=self.device_type)
+        output = module(inp)
+        inp = (
+            DTensor.from_local(inp, device_mesh, [Shard(0)], run_check=False)
+            .redistribute(device_mesh, [Shard(1)])
+            .to_local()
+        )
+        self.assertEqual(inp, output)
+
+    @with_comms
+    def test_parallelize_module_with_star(self):
+        inp_size = [12, 10]
+        model = MLPModule(self.device_type)
+        device_mesh = DeviceMesh(self.device_type, torch.arange(self.world_size))
+
+        model_tp = deepcopy(model)
+        model_tp = parallelize_module(
+            model_tp,
+            device_mesh,
+            {
+                "net*": ColwiseParallel(output_layouts=Replicate()),
+            },
+        )
+        self._compare_module(model, model_tp, inp_size, rank0_only=False)
+
+    @with_comms
+    def test_parallelize_module_src_data_rank(self):
+        # set seed different for each rank
+        torch.manual_seed(self.rank)
+        model = MLPModule(self.device_type)
+        device_mesh = DeviceMesh(self.device_type, torch.arange(self.world_size))
+
+        comm_mode = CommDebugMode()
+
+        # test src_data_rank == 1
+        with comm_mode:
+            model_tp = deepcopy(model)
+            model_tp = parallelize_module(
+                model_tp,
+                device_mesh,
+                {
+                    "net*": ColwiseParallel(output_layouts=Replicate()),
+                },
+                src_data_rank=1,
+            )
+
+        self.assertTrue(comm_mode.get_total_counts() > 0)
+        tp_full_params = [param.full_tensor() for param in model_tp.parameters()]
+        if self.rank == 1:
+            orig_model_params = list(model.parameters())
+            for idx, param in enumerate(tp_full_params):
+                self.assertEqual(param, orig_model_params[idx])
+
+        # test src_data_rank == None
+        model_tp_no_comm = deepcopy(model)
+        with comm_mode:
+            parallelize_module(
+                model_tp_no_comm,
+                device_mesh,
+                {
+                    "net1": ColwiseParallel(),
+                    "net2": RowwiseParallel(),
+                },
+                src_data_rank=None,
+            )
+            self.assertEqual(comm_mode.get_total_counts(), 0)
+
+    @with_comms
+    def test_parallelize_module_with_question(self):
+        inp_size = [12, 10]
+        model = MLPModule(self.device_type)
+        device_mesh = DeviceMesh(self.device_type, torch.arange(self.world_size))
+
+        model_tp = deepcopy(model)
+        model_tp = parallelize_module(
+            model_tp,
+            device_mesh,
+            {
+                "net?": ColwiseParallel(output_layouts=Replicate()),
+            },
+        )
+        self._compare_module(model, model_tp, inp_size, rank0_only=False)
+
+    @with_comms
+    def test_parallelize_module_with_digit(self):
+        inp_size = [12, 10]
+        model = MLPModule(self.device_type)
+        device_mesh = DeviceMesh(self.device_type, torch.arange(self.world_size))
+
+        model_tp = deepcopy(model)
+        model_tp = parallelize_module(
+            model_tp,
+            device_mesh,
+            {
+                "net[1-2]": ColwiseParallel(output_layouts=Replicate()),
+            },
+        )
+        self._compare_module(model, model_tp, inp_size, rank0_only=False)
+
+    @with_comms
+    def test_parallelize_module_multi_wildcard(self):
+        inp_size = [12, 10]
+        model = MLPStacked(self.device_type, n_layers=2)
+        device_mesh = DeviceMesh(self.device_type, torch.arange(self.world_size))
+
+        model_tp = deepcopy(model)
+        model_tp = parallelize_module(
+            model_tp,
+            device_mesh,
+            {
+                "layers.*.net[1]": ColwiseParallel(),
+                "layers.*.net[2]": RowwiseParallel(),
+            },
+        )
+        self._compare_module(model, model_tp, inp_size, rank0_only=False)
+
+    @with_comms
+    def test_parallelize_module_with_root_module(self):
+        inp_size = [16, 10]
+        model = MLPModule(self.device_type)
+        device_mesh = DeviceMesh(self.device_type, torch.arange(self.world_size))
+
+        model_tp = deepcopy(model)
+        model_tp = parallelize_module(
+            model_tp,
+            device_mesh,
+            {
+                "": PrepareModuleInputOutput(
+                    input_layouts=Replicate(),
+                    desired_input_layouts=Shard(0),
+                    output_layouts=Shard(0),
+                    desired_output_layouts=Replicate(),
+                ),
+                "net1": ColwiseParallel(input_layouts=Shard(0)),
+                "net2": RowwiseParallel(output_layouts=Shard(0)),
+            },
+        )
+        self._compare_module(model, model_tp, inp_size, rank0_only=False)
+
+    @with_comms
+    def test_parallelize_module_with_no_match(self):
+        inp_size = [16, 10]
+        model = MLPModule(self.device_type)
+        device_mesh = DeviceMesh(self.device_type, torch.arange(self.world_size))
+
+        model_tp = deepcopy(model)
+        with self.assertWarns(UserWarning):
+            model_tp = parallelize_module(
+                model_tp,
+                device_mesh,
+                {
+                    "net0.hello.world": ColwiseParallel(),
+                    "net1": ColwiseParallel(),
+                    "net2": RowwiseParallel(),
+                    "net3": ColwiseParallel(),
+                },
+            )
+        self._compare_module(model, model_tp, inp_size, rank0_only=False)
+
+    @with_comms
+    def test_under_devicemesh_context(self):
+        # test ColwiseParallel
+        inp_size = [8, 10]
+        colwise = ColwiseParallel(output_layouts=Replicate())
+
+        torch.manual_seed(5)
+        model = torch.nn.Linear(10, 16, device=self.device_type)
+        model_tp = deepcopy(model)
+
+        # Call parallelize_module under DeviceMesh context.
+        device_mesh = DeviceMesh(self.device_type, list(range(self.world_size)))
+        with device_mesh:
+            model_tp = parallelize_module(model_tp, parallelize_plan=colwise)
+
+        self._compare_module(model, model_tp, inp_size)
+
+    @with_comms
+    def test_empty_plan(self):
+        torch.manual_seed(5)
+        model = torch.nn.Linear(10, 16, device=self.device_type)
+
+        # Call parallelize_module with empty plan.
+        # Goal is not to crash.
+        device_mesh = DeviceMesh(self.device_type, list(range(self.world_size)))
+        with self.assertWarns(UserWarning):
+            parallelize_module(model, device_mesh)
+
+
+TensorParallelAPITestsWithLocalTensor = create_local_tensor_test_class(
+    TensorParallelAPITests,
+    base_class=LocalDTensorContinuousTestBase,
+    skipped_tests=[
+        # Uses mesh_scatter that has local rank dependent logic
+        "test_parallelize_module_src_data_rank",
+    ],
+)
 
 
 if __name__ == "__main__":

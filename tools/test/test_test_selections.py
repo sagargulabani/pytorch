@@ -1,28 +1,34 @@
+from __future__ import annotations
+
 import functools
-import pathlib
 import random
 import sys
 import unittest
 from collections import defaultdict
-from typing import Dict, List, Tuple
+from pathlib import Path
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 try:
     # using tools/ to optimize test run.
     sys.path.append(str(REPO_ROOT))
     from tools.testing.test_run import ShardedTest, TestRun
-    from tools.testing.test_selections import calculate_shards, THRESHOLD
+    from tools.testing.test_selections import (
+        calculate_shards,
+        get_job_base_name,
+        THRESHOLD,
+    )
 except ModuleNotFoundError:
     print("Can't import required modules, exiting")
     sys.exit(1)
 
 
-def gen_class_times(test_times: Dict[str, float]) -> Dict[str, Dict[str, float]]:
+def gen_class_times(test_times: dict[str, float]) -> dict[str, dict[str, float]]:
     return {k: {"class1": v} for k, v in test_times.items()}
 
 
 class TestCalculateShards(unittest.TestCase):
-    tests: List[TestRun] = [
+    tests: list[TestRun] = [
         TestRun("super_long_test"),
         TestRun("long_test1"),
         TestRun("long_test2"),
@@ -36,7 +42,7 @@ class TestCalculateShards(unittest.TestCase):
         TestRun("short_test5"),
     ]
 
-    test_times: Dict[str, float] = {
+    test_times: dict[str, float] = {
         "super_long_test": 55,
         "long_test1": 22,
         "long_test2": 18,
@@ -50,7 +56,7 @@ class TestCalculateShards(unittest.TestCase):
         "short_test5": 0.01,
     }
 
-    test_class_times: Dict[str, Dict[str, float]] = {
+    test_class_times: dict[str, dict[str, float]] = {
         "super_long_test": {"class1": 55},
         "long_test1": {"class1": 1, "class2": 21},
         "long_test2": {"class1": 10, "class2": 8},
@@ -66,8 +72,8 @@ class TestCalculateShards(unittest.TestCase):
 
     def assert_shards_equal(
         self,
-        expected_shards: List[Tuple[float, List[ShardedTest]]],
-        actual_shards: List[Tuple[float, List[ShardedTest]]],
+        expected_shards: list[tuple[float, list[ShardedTest]]],
+        actual_shards: list[tuple[float, list[ShardedTest]]],
     ) -> None:
         for expected, actual in zip(expected_shards, actual_shards):
             self.assertAlmostEqual(expected[0], actual[0])
@@ -363,7 +369,7 @@ class TestCalculateShards(unittest.TestCase):
         )
 
     def test_split_shards(self) -> None:
-        test_times: Dict[str, float] = {"test1": THRESHOLD, "test2": THRESHOLD}
+        test_times: dict[str, float] = {"test1": THRESHOLD, "test2": THRESHOLD}
         expected_shards = [
             (600.0, [ShardedTest(test="test1", shard=1, num_shards=1, time=THRESHOLD)]),
             (600.0, [ShardedTest(test="test2", shard=1, num_shards=1, time=THRESHOLD)]),
@@ -372,7 +378,7 @@ class TestCalculateShards(unittest.TestCase):
             expected_shards,
             calculate_shards(
                 2,
-                [TestRun(t) for t in test_times.keys()],
+                [TestRun(t) for t in test_times],
                 test_times,
                 gen_class_times(test_times),
             ),
@@ -402,7 +408,7 @@ class TestCalculateShards(unittest.TestCase):
             expected_shards,
             calculate_shards(
                 2,
-                [TestRun(t) for t in test_times.keys()],
+                [TestRun(t) for t in test_times],
                 test_times,
                 gen_class_times(test_times),
             ),
@@ -420,10 +426,72 @@ class TestCalculateShards(unittest.TestCase):
             expected_shards,
             calculate_shards(
                 2,
-                [TestRun(t) for t in test_times.keys()],
+                [TestRun(t) for t in test_times],
                 test_times,
                 gen_class_times(test_times),
             ),
+        )
+
+    def test_disable_pytest_sharding_preserves_file_times(self) -> None:
+        test_times = {"test1": THRESHOLD * 4, "test2": THRESHOLD * 2.5}
+        shards = calculate_shards(
+            2,
+            [TestRun(t) for t in test_times],
+            test_times,
+            gen_class_times(test_times),
+            allow_pytest_sharding=False,
+        )
+
+        tests = [test for _, shard in shards for test in shard]
+        self.assertEqual([test.num_shards for test in tests], [1, 1])
+        self.assertEqual([test.get_time() for test in tests], list(test_times.values()))
+
+    def test_xdist_workers_divide_file_time(self) -> None:
+        test_times: dict[str, float] = {
+            "xdist_test": THRESHOLD * 3,
+            "plain_test": THRESHOLD * 3,
+        }
+        shards = calculate_shards(
+            2,
+            [TestRun(t) for t in test_times],
+            test_times,
+            gen_class_times(test_times),
+            xdist_workers=lambda test: 3 if test == "xdist_test" else 1,
+        )
+
+        tests = sorted(
+            (test for _, shard in shards for test in shard),
+            key=lambda test: (test.name, test.shard),
+        )
+        self.assertEqual(
+            tests,
+            [
+                ShardedTest("plain_test", 1, 3, THRESHOLD),
+                ShardedTest("plain_test", 2, 3, THRESHOLD),
+                ShardedTest("plain_test", 3, 3, THRESHOLD),
+                ShardedTest("xdist_test", 1, 1, THRESHOLD),
+            ],
+        )
+        self.assertEqual(sorted(time for time, _ in shards), [THRESHOLD * 2] * 2)
+
+    def test_xdist_workers_split_divided_time_in_test_order(self) -> None:
+        # run_test.py shards its main batch with sort_by_time=False, and splits a
+        # serial xdist file by its divided time.
+        test_times: dict[str, float] = {"xdist_test": THRESHOLD * 7}
+        shards = calculate_shards(
+            3,
+            [TestRun("xdist_test")],
+            test_times,
+            gen_class_times(test_times),
+            must_serial=lambda _: True,
+            sort_by_time=False,
+            xdist_workers=lambda _: 3,
+        )
+
+        piece_time = THRESHOLD * 7 / 3 / 3
+        self.assertEqual(
+            [shard for _, shard in shards],
+            [[ShardedTest("xdist_test", i, 3, piece_time)] for i in (1, 2, 3)],
         )
 
     def test_zero_tests(self) -> None:
@@ -438,7 +506,7 @@ class TestCalculateShards(unittest.TestCase):
             tests = [TestRun(x) for x in test_names]
             serial = [x for x in test_names if random.randint(0, 1) == 0]
             has_times = [x for x in test_names if random.randint(0, 1) == 0]
-            random_times: Dict[str, float] = {
+            random_times: dict[str, float] = {
                 i: random.randint(0, THRESHOLD * 10) for i in has_times
             }
             sort_by_time = random.randint(0, 1) == 0
@@ -456,7 +524,7 @@ class TestCalculateShards(unittest.TestCase):
             max_diff = max(times) - min(times)
             self.assertTrue(max_diff <= THRESHOLD + (num_tests - len(has_times)) * 60)
 
-            all_sharded_tests: Dict[str, List[ShardedTest]] = defaultdict(list)
+            all_sharded_tests: dict[str, list[ShardedTest]] = defaultdict(list)
             for _, sharded_tests in shards:
                 for sharded_test in sharded_tests:
                     all_sharded_tests[sharded_test.name].append(sharded_test)
@@ -472,7 +540,8 @@ class TestCalculateShards(unittest.TestCase):
                 else:
                     # x.time is not None because of the above check
                     self.assertAlmostEqual(
-                        random_times[test], sum(x.time for x in sharded_tests)  # type: ignore[misc]
+                        random_times[test],
+                        sum(x.time for x in sharded_tests),  # type: ignore[misc]
                     )
                 self.assertListEqual(
                     list(range(sharded_tests[0].num_shards)),
@@ -544,6 +613,52 @@ class TestCalculateShards(unittest.TestCase):
                 )
                 # All the tests should be represented by some shard
                 self.assertEqual(sorted_tests, [x.name for x in sorted_shard_tests])
+
+
+class TestGetJobBaseName(unittest.TestCase):
+    def test_strips_test_target(self) -> None:
+        self.assertEqual(
+            get_job_base_name(
+                "linux-jammy-py3.10-clang18 / test (dynamo_wrapped, 1, 3, lf-l-x86)"
+            ),
+            "linux-jammy-py3.10-clang18",
+        )
+
+    def test_strips_test_osdc_target(self) -> None:
+        self.assertEqual(
+            get_job_base_name(
+                "linux-jammy-py3.14t-clang18 / test-osdc (dynamo_wrapped, 1, 3, mt-l-x86)"
+            ),
+            "linux-jammy-py3.14t-clang18",
+        )
+
+    def test_build_env_with_test_substring_is_preserved(self) -> None:
+        # The build env itself contains "-test-"; only the target suffix is stripped.
+        self.assertEqual(
+            get_job_base_name(
+                "cross-compile-linux-test-cuda13 / test-osdc (aoti, 1, 1, r, win)"
+            ),
+            "cross-compile-linux-test-cuda13",
+        )
+
+    def test_multi_segment_name_keeps_full_prefix(self) -> None:
+        # Only the final target is split; the rest is the key.
+        self.assertEqual(
+            get_job_base_name(
+                "unit-test / inductor-test / test-osdc (inductor, 2, 2, mt-l-x86)"
+            ),
+            "unit-test / inductor-test",
+        )
+
+    def test_unrelated_targets_are_not_matched(self) -> None:
+        # Non-test/test-osdc targets are left intact so they miss the lookup.
+        for name in (
+            "env / test-foo (default, 1, 1, r)",
+            "env / testbar (default, 1, 1, r)",
+            "env / inductor-cpu-core-test (3.11)",
+            "env / build",
+        ):
+            self.assertEqual(get_job_base_name(name), name)
 
 
 if __name__ == "__main__":
